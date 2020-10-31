@@ -14,7 +14,6 @@ import it.unimi.dsi.fastutil.longs.LongSet;
 import org.elasticsearch.index.query.BoolQueryBuilder;
 import org.elasticsearch.index.query.QueryBuilder;
 import org.elasticsearch.index.query.RegexpQueryBuilder;
-import org.elasticsearch.search.aggregations.Aggregation;
 import org.elasticsearch.search.aggregations.AggregationBuilders;
 import org.elasticsearch.search.sort.FieldSortBuilder;
 import org.slf4j.Logger;
@@ -30,16 +29,15 @@ import org.snomed.snowstorm.ecl.ECLQueryService;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.ApplicationContext;
 import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.PageRequest;
-import org.springframework.data.elasticsearch.core.ElasticsearchOperations;
-import org.springframework.data.elasticsearch.core.aggregation.AggregatedPage;
+import org.springframework.data.elasticsearch.core.*;
 import org.springframework.data.elasticsearch.core.query.NativeSearchQuery;
 import org.springframework.data.elasticsearch.core.query.NativeSearchQueryBuilder;
-import org.springframework.data.elasticsearch.core.query.SearchQuery;
-import org.springframework.data.util.CloseableIterator;
 import org.springframework.stereotype.Service;
 
 import java.util.*;
+import java.util.stream.Collectors;
 
 import static java.lang.Long.parseLong;
 import static org.elasticsearch.index.query.QueryBuilders.*;
@@ -95,9 +93,16 @@ public class ReferenceSetMemberService extends ComponentService {
 	 */
 	public Page<ReferenceSetMember> findMembers(String branch, MemberSearchRequest searchRequest, PageRequest pageRequest) {
 		BranchCriteria branchCriteria = versionControlHelper.getBranchCriteria(branch);
-		BoolQueryBuilder query = buildMemberQuery(searchRequest, branch, branchCriteria);
-		return elasticsearchTemplate.queryForPage(new NativeSearchQueryBuilder()
-				.withQuery(query).withPageable(pageRequest).build(), ReferenceSetMember.class);
+		NativeSearchQuery query = new NativeSearchQueryBuilder().withQuery(buildMemberQuery(searchRequest, branch, branchCriteria)).withPageable(pageRequest).build();
+		query.setTrackTotalHits(true);
+		SearchHits<ReferenceSetMember> searchHits = elasticsearchTemplate.search(query, ReferenceSetMember.class);
+		return new PageImpl<>(searchHits.get().map(SearchHit::getContent).collect(Collectors.toList()), query.getPageable(), searchHits.getTotalHits());
+	}
+
+	public Page<ReferenceSetMember> findMembers(String branch, BranchCriteria branchCriteria, MemberSearchRequest searchRequest, PageRequest pageRequest) {
+		NativeSearchQuery query = new NativeSearchQueryBuilder().withQuery(buildMemberQuery(searchRequest, branch, branchCriteria)).withPageable(pageRequest).build();
+		SearchHits<ReferenceSetMember> searchHits = elasticsearchTemplate.search(query, ReferenceSetMember.class);
+		return new PageImpl<>(searchHits.get().map(SearchHit::getContent).collect(Collectors.toList()), pageRequest, searchHits.getTotalHits());
 	}
 
 	private BoolQueryBuilder buildMemberQuery(MemberSearchRequest searchRequest, String branch, BranchCriteria branchCriteria) {
@@ -149,15 +154,28 @@ public class ReferenceSetMemberService extends ComponentService {
 	}
 
 	public ReferenceSetMember findMember(String branch, String uuid) {
-		BranchCriteria branchCriteria = versionControlHelper.getBranchCriteria(branch);
-		BoolQueryBuilder query = boolQuery().must(branchCriteria.getEntityBranchCriteria(ReferenceSetMember.class))
-				.must(termQuery(ReferenceSetMember.Fields.MEMBER_ID, uuid));
-		List<ReferenceSetMember> referenceSetMembers = elasticsearchTemplate.queryForList(new NativeSearchQueryBuilder()
-				.withQuery(query).build(), ReferenceSetMember.class);
-		if (!referenceSetMembers.isEmpty()) {
-			return referenceSetMembers.get(0);
+		List<ReferenceSetMember> result = findMembers(branch, Arrays.asList(uuid));
+		if (result != null && result.size() > 1) {
+			throw new IllegalStateException(String.format("Found more than one referenceSetMembers with uuid %s on branch %s", uuid, branch));
+		}
+		if (!result.isEmpty()) {
+			return result.get(0);
 		}
 		return null;
+	}
+
+	public List<ReferenceSetMember> findMembers(BranchCriteria branchCriteria, Collection<String> uuids) {
+		BoolQueryBuilder query = boolQuery()
+				.must(branchCriteria.getEntityBranchCriteria(ReferenceSetMember.class))
+				.must(termsQuery(ReferenceSetMember.Fields.MEMBER_ID, uuids));
+		return elasticsearchTemplate.search(new NativeSearchQueryBuilder().withQuery(query).withPageable(LARGE_PAGE).build(), ReferenceSetMember.class)
+				.stream()
+				.map(SearchHit::getContent).collect(Collectors.toList());
+	}
+
+	public List<ReferenceSetMember> findMembers(String branch, Collection<String> uuids) {
+		BranchCriteria branchCriteria = versionControlHelper.getBranchCriteria(branch);
+		return findMembers(branchCriteria, uuids);
 	}
 
 	public ReferenceSetMember createMember(String branch, ReferenceSetMember member) {
@@ -182,23 +200,38 @@ public class ReferenceSetMemberService extends ComponentService {
 	}
 
 	public void deleteMember(String branch, String uuid, boolean force) {
-		BranchCriteria branchCriteria = versionControlHelper.getBranchCriteria(branch);
-		List<ReferenceSetMember> matches = elasticsearchTemplate.queryForList(new NativeSearchQueryBuilder().withQuery(
-				boolQuery().must(branchCriteria.getEntityBranchCriteria(ReferenceSetMember.class))
-						.must(termQuery(ReferenceSetMember.Fields.MEMBER_ID, uuid))
-		).build(), ReferenceSetMember.class);
+		deleteMembers(branch, Collections.singleton(uuid), force);
+	}
 
-		if (matches.isEmpty()) {
-			throw new NotFoundException(String.format("Reference set member %s not found on branch %s", uuid, branch));
+	public void deleteMembers(String branch, Set<String> uuids, boolean force) {
+		if (uuids.isEmpty()) {
+			return;
+		}
+		BranchCriteria branchCriteria = versionControlHelper.getBranchCriteria(branch);
+		NativeSearchQuery query = new NativeSearchQueryBuilder().withQuery(boolQuery()
+				.must(branchCriteria.getEntityBranchCriteria(ReferenceSetMember.class))
+				.must(termsQuery(ReferenceSetMember.Fields.MEMBER_ID, uuids)))
+				.withPageable(PageRequest.of(0, uuids.size()))
+				.build();
+		List<ReferenceSetMember> matches = elasticsearchTemplate.search(query, ReferenceSetMember.class).stream().map(SearchHit::getContent).collect(Collectors.toList());
+		if (matches.size() != uuids.size()) {
+			List<String> matchedIds = matches.stream().map(ReferenceSetMember::getMemberId).collect(Collectors.toList());
+			Set<String> missingIds = new HashSet<>(uuids);
+			missingIds.removeAll(matchedIds);
+			throw new NotFoundException(String.format("%s reference set members not found on branch %s: %s", missingIds.size(), branch, missingIds));
 		}
 
-		try (Commit commit = branchService.openCommit(branch, branchMetadataHelper.getBranchLockMetadata("Deleting reference set member " + uuid))) {
-			ReferenceSetMember member = matches.get(0);
+		for (ReferenceSetMember member : matches) {
 			if (member.isReleased() && !force) {
-				throw new IllegalStateException(String.format("Reference set member %s has been released and can't be deleted on branch %s", uuid, branch));
+				throw new IllegalStateException(String.format("Reference set member %s has been released and can't be deleted on branch %s.", member.getMemberId(), branch));
 			}
-			member.markDeleted();
-			doSaveBatchComponents(Collections.singleton(member), commit, ReferenceSetMember.Fields.MEMBER_ID, memberRepository);
+		}
+
+		try (Commit commit = branchService.openCommit(branch, branchMetadataHelper.getBranchLockMetadata(String.format("Deleting %s reference set members.", matches.size())))) {
+			for (ReferenceSetMember member : matches) {
+				member.markDeleted();
+			}
+			doSaveBatchComponents(matches, commit, ReferenceSetMember.Fields.MEMBER_ID, memberRepository);
 			commit.markSuccessful();
 		}
 	}
@@ -249,9 +282,9 @@ public class ReferenceSetMemberService extends ComponentService {
 								.must(termsQuery("descriptionId", descriptionIdsSegment))
 								.must(versionControlHelper.getBranchCriteriaIncludingOpenCommit(commit).getEntityBranchCriteria(Description.class)))
 						.withPageable(LARGE_PAGE);
-				try (final CloseableIterator<Description> descriptions = elasticsearchTemplate.stream(queryBuilder.build(), Description.class)) {
+				try (final SearchHitsIterator<Description> descriptions = elasticsearchTemplate.searchForStream(queryBuilder.build(), Description.class)) {
 					descriptions.forEachRemaining(description ->
-							descriptionsFromStore.put(parseLong(description.getDescriptionId()), description));
+							descriptionsFromStore.put(parseLong(description.getContent().getDescriptionId()), description.getContent()));
 				}
 			}
 
@@ -290,8 +323,8 @@ public class ReferenceSetMemberService extends ComponentService {
 
 		// Stream results
 		Set<Long> conceptIds = new LongArraySet();
-		try (CloseableIterator<ReferenceSetMember> stream = elasticsearchTemplate.stream(query, ReferenceSetMember.class)) {
-			stream.forEachRemaining(member -> conceptIds.add(parseLong(member.getReferencedComponentId())));
+		try (SearchHitsIterator<ReferenceSetMember> stream = elasticsearchTemplate.searchForStream(query, ReferenceSetMember.class)) {
+			stream.forEachRemaining(member -> conceptIds.add(parseLong(member.getContent().getReferencedComponentId())));
 		}
 		return conceptIds;
 	}
@@ -334,7 +367,7 @@ public class ReferenceSetMemberService extends ComponentService {
 	public List<ReferenceSetType> findConfiguredReferenceSetTypes(String path) {
 		QueryBuilder branchCriteria = versionControlHelper.getBranchCriteria(path).getEntityBranchCriteria(ReferenceSetType.class);
 		NativeSearchQuery query = new NativeSearchQueryBuilder().withQuery(branchCriteria).withPageable(LARGE_PAGE).build();
-		return elasticsearchTemplate.queryForList(query, ReferenceSetType.class);
+		return elasticsearchTemplate.search(query, ReferenceSetType.class).stream().map(SearchHit::getContent).collect(Collectors.toList());
 	}
 
 	public ReferenceSetMember updateMember(String branch, ReferenceSetMember member) {
@@ -361,19 +394,14 @@ public class ReferenceSetMemberService extends ComponentService {
 	public PageWithBucketAggregations<ReferenceSetMember> findReferenceSetMembersWithAggregations(String branch, PageRequest pageRequest, MemberSearchRequest searchRequest) {
 		BranchCriteria branchCriteria = versionControlHelper.getBranchCriteria(branch);
 		BoolQueryBuilder query = buildMemberQuery(searchRequest, branch, branchCriteria);
-		SearchQuery searchQuery = new NativeSearchQueryBuilder()
+		NativeSearchQuery searchQuery = new NativeSearchQueryBuilder()
 				.withQuery(query)
 				.withPageable(pageRequest)
 				.addAggregation(AggregationBuilders.terms(AGGREGATION_MEMBER_COUNTS_BY_REFERENCE_SET).field(ReferenceSetMember.Fields.REFSET_ID).size(AGGREGATION_SEARCH_SIZE))
 				.build();
 
-		AggregatedPage<ReferenceSetMember> pageResults = (AggregatedPage<ReferenceSetMember>) elasticsearchTemplate.queryForPage(searchQuery, ReferenceSetMember.class);
-
-		List<Aggregation> aggregations = new ArrayList<>();
-		if (pageResults.hasAggregations()) {
-			aggregations.addAll(pageResults.getAggregations().asList());
-		}
-		return PageWithBucketAggregationsFactory.createPage(pageResults, aggregations);
+		SearchHits<ReferenceSetMember> pageResults = elasticsearchTemplate.search(searchQuery, ReferenceSetMember.class);
+		return PageWithBucketAggregationsFactory.createPage(pageResults, pageResults.getAggregations(), pageRequest);
 	}
 
 	public Map<String, String> findRefsetTypes(Set<String> referenceSetIds, BranchCriteria branchCriteria, String branch) {
@@ -387,7 +415,7 @@ public class ReferenceSetMemberService extends ComponentService {
 				)
 				.withPageable(LARGE_PAGE)
 				.build();
-		final List<QueryConcept> concepts = elasticsearchTemplate.queryForPage(searchQuery, QueryConcept.class).getContent();
+		final List<QueryConcept> concepts = elasticsearchTemplate.search(searchQuery, QueryConcept.class).stream().map(SearchHit::getContent).collect(Collectors.toList());
 
 		Map<String, String> refsetTypes = new HashMap<>();
 		for (QueryConcept concept : concepts) {

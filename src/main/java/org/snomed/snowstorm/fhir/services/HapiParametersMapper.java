@@ -22,13 +22,56 @@ public class HapiParametersMapper implements FHIRConstants {
 	@Autowired
 	private ExpressionService expressionService;
 	
-	public Parameters mapToFHIR(Concept c, Collection<Long> childIds, Set<FhirSctProperty> properties, String displayLanguage) {
+	public Parameters mapToFHIR(Concept concept, String display) {
 		Parameters parameters = getStandardParameters();
-		Parameters.ParametersParameterComponent preferredTerm = new Parameters.ParametersParameterComponent(DISPLAY);
-		parameters.addParameter(preferredTerm);
-		addDesignations(parameters, c, preferredTerm, displayLanguage);
-		addProperties(parameters, c, properties);
-		addParents(parameters,c);
+		if (display == null) {
+			parameters.addParameter("result", true);
+		} else {
+			validateTerm(concept, display.toLowerCase(), parameters);
+		}
+		parameters.addParameter("display", concept.getPt().getTerm());
+		return parameters;
+	}
+	
+	public Parameters singleOutValue(String key, String value) {
+		Parameters parameters = getStandardParameters();
+		parameters.addParameter(key, value);
+		return parameters;
+	}
+	
+	private void validateTerm(Concept c, String display, Parameters parameters) {
+		//Did we get it right first time?
+		if (c.getPt().getTerm().toLowerCase().equals(display)) {
+			parameters.addParameter("result", true);
+			return;
+		} else {
+			//TODO Implement case sensitivity checking relative to what is specified for the description
+			for (Description d : c.getActiveDescriptions()) {
+				if (d.getTerm().toLowerCase().equals(display)) {
+					parameters.addParameter("result", true);
+					parameters.addParameter("message", "Display term is acceptable, but not the preferred synonym in the language/dialect specified");
+					return;
+				}
+			}
+		}
+		parameters.addParameter("result", false);
+		parameters.addParameter("message", "Concept identifier exists, but the display term is not recognised");
+		
+	}
+
+	public Parameters conceptNotFound() {
+		Parameters parameters = getStandardParameters();
+		parameters.addParameter("result", false);
+		return parameters;
+	}
+
+	public Parameters mapToFHIR(StringType codeSystem, Concept concept, Collection<Long> childIds, Set<FhirSctProperty> properties) {
+		Parameters parameters = getStandardParameters();
+		parameters.addParameter("version", codeSystem.toString());
+		parameters.addParameter("display", concept.getPt().getTerm());
+		addProperties(parameters, concept, properties);
+		addDesignations(parameters, concept);
+		addParents(parameters, concept);
 		addChildren(parameters, childIds);
 		return parameters;
 	}
@@ -68,7 +111,10 @@ public class HapiParametersMapper implements FHIRConstants {
 					if (mapTarget == null) {
 						mapTarget = member.getAdditionalField(ReferenceSetMember.AssociationFields.MAP_TARGET);
 					}
-					
+					//We might be looking up an attribute value refset for an inactivation indicator MAINT-1221
+					if (mapTarget == null) {
+						mapTarget = member.getAdditionalField("valueId");
+					}
 					if (mapTarget != null) {
 						Coding coding = new Coding().setCode(mapTarget).setSystemElement(targetSystem);
 						matches.addPart().setName("mapTarget").setValue(coding);
@@ -79,6 +125,7 @@ public class HapiParametersMapper implements FHIRConstants {
 		return p;
 	}
 
+	// TODO: Work out what we should be including here
 	private Parameters getStandardParameters() {
 		Parameters parameters = new Parameters();
 		//String copyrightStr = COPYRIGHT.replace("YEAR", Integer.toString(Year.now().getValue()));
@@ -88,26 +135,12 @@ public class HapiParametersMapper implements FHIRConstants {
 		return parameters;
 	}
 
-	private void addDesignations(Parameters parameters, Concept c, Parameters.ParametersParameterComponent preferredTerm, String displayLanguage) {
-		for (Description d : c.getDescriptions(true, null, null, null)) {
+	private void addDesignations(Parameters parameters, Concept c) {
+		for (Description d : c.getActiveDescriptions()) {
 			Parameters.ParametersParameterComponent designation = parameters.addParameter().setName(DESIGNATION);
 			designation.addPart().setName(LANGUAGE).setValue(new CodeType(d.getLang()));
 			designation.addPart().setName(USE).setValue(new Coding(SNOMED_URI, d.getTypeId(), FHIRHelper.translateDescType(d.getTypeId())));
 			designation.addPart().setName(VALUE).setValue(new StringType(d.getTerm()));
-
-			//Are we working with a display language or the default?
-			if (displayLanguage == null) {
-				if (d.hasAcceptability(Concepts.PREFERRED, Concepts.US_EN_LANG_REFSET) && 
-						d.getTypeId().equals(Concepts.FSN)) {
-					preferredTerm.setValue(new StringType(d.getTerm()));
-				}
-			} else {
-				if (d.getLang().equals(displayLanguage) && 
-						d.hasAcceptability(Concepts.PREFERRED) &&
-						d.getTypeId().equals(Concepts.SYNONYM)) {
-					preferredTerm.setValue(new StringType(d.getTerm()));
-				}
-			}
 		}
 	}
 
@@ -115,21 +148,23 @@ public class HapiParametersMapper implements FHIRConstants {
 		Boolean sufficientlyDefined = c.getDefinitionStatusId().equals(Concepts.SUFFICIENTLY_DEFINED);
 		parameters.addParameter(createProperty(EFFECTIVE_TIME, c.getEffectiveTime(), false))
 			.addParameter(createProperty(MODULE_ID, c.getModuleId(), true));
+		
+		boolean allProperties = properties.contains(FhirSctProperty.ALL_PROPERTIES);
 	
-		if (properties.contains(FhirSctProperty.INACTVE)) {
+		if (allProperties || properties.contains(FhirSctProperty.INACTVE)) {
 			parameters.addParameter(createProperty(FhirSctProperty.INACTVE.toStringType(), !c.isActive(), false));
 		}
 		
-		if (properties.contains(FhirSctProperty.SUFFICIENTLY_DEFINED)) {
+		if (allProperties || properties.contains(FhirSctProperty.SUFFICIENTLY_DEFINED)) {
 			parameters.addParameter(createProperty(FhirSctProperty.SUFFICIENTLY_DEFINED.toStringType(), sufficientlyDefined, false));
 		}
 		
-		if (properties.contains(FhirSctProperty.NORMAL_FORM_TERSE)) {
+		if (allProperties || properties.contains(FhirSctProperty.NORMAL_FORM_TERSE)) {
 			Expression expression = expressionService.getExpression(c, false);
 			parameters.addParameter(createProperty(FhirSctProperty.NORMAL_FORM_TERSE.toStringType(), expression.toString(false), false));
 		}
 		
-		if (properties.contains(FhirSctProperty.NORMAL_FORM)) {
+		if (allProperties || properties.contains(FhirSctProperty.NORMAL_FORM)) {
 			Expression expression = expressionService.getExpression(c, false);
 			parameters.addParameter(createProperty(FhirSctProperty.NORMAL_FORM.toStringType(), expression.toString(true), false));
 		}

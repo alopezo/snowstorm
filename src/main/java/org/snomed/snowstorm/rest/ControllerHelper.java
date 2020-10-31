@@ -3,24 +3,37 @@ package org.snomed.snowstorm.rest;
 import io.kaicode.rest.util.branchpathrewrite.BranchPathUriUtil;
 import org.elasticsearch.common.Strings;
 import org.snomed.snowstorm.core.data.domain.ConceptMini;
+import org.snomed.snowstorm.core.data.services.DialectConfigurationService;
 import org.snomed.snowstorm.core.data.services.NotFoundException;
+import org.snomed.snowstorm.core.data.services.identifier.IdentifierService;
 import org.snomed.snowstorm.core.pojo.BranchTimepoint;
+import org.snomed.snowstorm.core.pojo.LanguageDialect;
 import org.snomed.snowstorm.rest.pojo.ConceptMiniNestedFsn;
 import org.springframework.data.domain.PageRequest;
-import org.snomed.snowstorm.rest.converter.SearchAfterHelper;
-import org.springframework.data.elasticsearch.core.SearchAfterPageRequest;
+import org.springframework.data.domain.Sort;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.stereotype.Component;
 import org.springframework.web.servlet.support.ServletUriComponentsBuilder;
 
-import java.util.*;
-import java.util.function.Supplier;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.List;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
-public class ControllerHelper {
+import static java.lang.Long.parseLong;
+import static org.snomed.snowstorm.config.Config.DEFAULT_LANGUAGE_DIALECTS;
 
-	public static final String DEFAULT_ACCEPT_LANG_HEADER = "en-US;q=0.8,en-GB;q=0.6";
+@Component
+public class ControllerHelper {
+	
+	private static final Pattern LANGUAGE_PATTERN = Pattern.compile("([a-z]{2})");
+	private static final Pattern LANGUAGE_AND_REFSET_PATTERN = Pattern.compile("([a-z]{2})-x-(" + IdentifierService.SCTID_PATTERN + ")");
+	private static final Pattern LANGUAGE_AND_DIALECT_PATTERN = Pattern.compile("([a-z]{2})-([a-z]{2})");
+	private static final Pattern LANGUAGE_AND_DIALECT_AND_REFSET_PATTERN = Pattern.compile("([a-z]{2})-([a-z]{2})-x-(" + IdentifierService.SCTID_PATTERN + ")");
 
 	public static BranchTimepoint parseBranchTimepoint(String branch) {
 		String[] parts = BranchPathUriUtil.decodePath(branch).split("@");
@@ -67,34 +80,75 @@ public class ControllerHelper {
 	}
 
 	public static PageRequest getPageRequest(int offset, int limit) {
-		return getPageRequest(offset, null, limit);
+		return getPageRequest(offset, limit, null);
 	}
 
-	public static PageRequest getPageRequest(int offset, String searchAfter, int limit) {
-		if (!Strings.isNullOrEmpty(searchAfter)) {
-			return SearchAfterPageRequest.of(SearchAfterHelper.fromSearchAfterToken(searchAfter), limit);
-		}
+	public static PageRequest getPageRequest(int offset, int limit, Sort sort) {
 		if (offset % limit != 0) {
 			throw new IllegalArgumentException("Offset must be a multiplication of the limit param in order to map to Spring pages.");
 		}
 
 		int page = ((offset + limit) / limit) - 1;
 		int size = limit;
-		return PageRequest.of(page, size);
+		return sort == null ? PageRequest.of(page, size) : PageRequest.of(page, size, sort);
 	}
 
+	//use parseAcceptLanguageHeader and work with LanguageDialects instead
+	@Deprecated
 	public static List<String> getLanguageCodes(String acceptLanguageHeader) {
-		List<Locale.LanguageRange> languageRanges = Locale.LanguageRange.parse(acceptLanguageHeader);
+		return parseAcceptLanguageHeaderWithDefaultFallback(acceptLanguageHeader).stream().map(LanguageDialect::getLanguageCode).collect(Collectors.toList());
+	}
+	
+	public static List<LanguageDialect> parseAcceptLanguageHeaderWithDefaultFallback(String acceptLanguageHeader) {
+		List<LanguageDialect> languageDialects = parseAcceptLanguageHeader(acceptLanguageHeader);
+		languageDialects.addAll(DEFAULT_LANGUAGE_DIALECTS);
+		return languageDialects;
+	}
 
-		List<String> languageCodes = new ArrayList<>(languageRanges.stream()
-				.map(languageRange -> languageRange.getRange().contains("-") ? languageRange.getRange().substring(0, languageRange.getRange().indexOf("-")) : languageRange.getRange())
-				.collect(Collectors.toCollection((Supplier<Set<String>>) LinkedHashSet::new)));
+	public static List<LanguageDialect> parseAcceptLanguageHeader(String acceptLanguageHeader) {
+		// en-ie-x-21000220103;q=0.8,en-US;q=0.5
+		List<LanguageDialect> languageDialects = new ArrayList<>();
 
-		// Always include en at the end if not already present because this is the default language.
-		if (!languageCodes.contains("en")) {
-			languageCodes.add("en");
+		if (acceptLanguageHeader == null) {
+			acceptLanguageHeader = "";
 		}
-		return languageCodes;
+
+		String[] acceptLanguageList = acceptLanguageHeader.toLowerCase().split(",");
+		for (String acceptLanguage : acceptLanguageList) {
+			if (acceptLanguage.isEmpty()) {
+				continue;
+			}
+
+			String languageCode;
+			Long languageReferenceSet = null;
+
+			String[] valueAndWeight = acceptLanguage.split(";");
+			// We don't use the weight, just take the value
+			String value = valueAndWeight[0];
+
+			Matcher matcher = LANGUAGE_PATTERN.matcher(value);
+			if (matcher.matches()) {
+				languageCode = matcher.group(1);
+			} else if ((matcher = LANGUAGE_AND_REFSET_PATTERN.matcher(value)).matches()) {
+				languageCode = matcher.group(1);
+				languageReferenceSet = parseLong(matcher.group(2));
+			} else if ((matcher = LANGUAGE_AND_DIALECT_PATTERN.matcher(value)).matches()) {
+				languageCode = matcher.group(1);
+				languageReferenceSet = DialectConfigurationService.instance().findRefsetForDialect(value); 
+			} else if ((matcher = LANGUAGE_AND_DIALECT_AND_REFSET_PATTERN.matcher(value)).matches()) {
+				languageCode = matcher.group(1);
+				languageReferenceSet = parseLong(matcher.group(3));
+			} else {
+				throw new IllegalArgumentException("Unexpected value within Accept-Language request header '" + value + "'.");
+			}
+			
+			LanguageDialect languageDialect = new LanguageDialect(languageCode, languageReferenceSet);
+			if (!languageDialects.contains(languageDialect)) {
+				//Would normally use a Set here, but the order may be important
+				languageDialects.add(languageDialect);
+			}
+		}
+		return languageDialects;
 	}
 
 	static void validatePageSize(long offset, int limit) {

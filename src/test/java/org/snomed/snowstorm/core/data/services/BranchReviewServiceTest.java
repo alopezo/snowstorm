@@ -3,30 +3,27 @@ package org.snomed.snowstorm.core.data.services;
 import io.kaicode.elasticvc.api.BranchService;
 import io.kaicode.elasticvc.domain.Branch;
 import org.junit.Assert;
-import org.junit.Before;
-import org.junit.Test;
-import org.junit.runner.RunWith;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.snomed.snowstorm.AbstractTest;
-import org.snomed.snowstorm.TestConfig;
 import org.snomed.snowstorm.core.data.domain.*;
 import org.snomed.snowstorm.core.data.domain.review.BranchReview;
 import org.snomed.snowstorm.core.data.domain.review.MergeReview;
 import org.snomed.snowstorm.core.data.domain.review.MergeReviewConceptVersions;
 import org.snomed.snowstorm.core.data.domain.review.ReviewStatus;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.data.elasticsearch.core.ElasticsearchTemplate;
-import org.springframework.test.context.ContextConfiguration;
-import org.springframework.test.context.junit4.SpringJUnit4ClassRunner;
+import org.springframework.data.elasticsearch.core.ElasticsearchRestTemplate;
+import org.springframework.test.context.junit.jupiter.SpringExtension;
 
 import java.util.*;
 import java.util.stream.Collectors;
 
 import static org.junit.Assert.*;
-import static org.snomed.snowstorm.TestConfig.DEFAULT_LANGUAGE_CODES;
+import static org.snomed.snowstorm.config.Config.DEFAULT_LANGUAGE_DIALECTS;
 
-@RunWith(SpringJUnit4ClassRunner.class)
-@ContextConfiguration(classes = TestConfig.class)
-public class BranchReviewServiceTest extends AbstractTest {
+@ExtendWith(SpringExtension.class)
+class BranchReviewServiceTest extends AbstractTest {
 
 	@Autowired
 	private BranchReviewService reviewService;
@@ -41,15 +38,15 @@ public class BranchReviewServiceTest extends AbstractTest {
 	private BranchMergeService mergeService;
 
 	@Autowired
-	private ElasticsearchTemplate elasticsearchTemplate;
+	private ElasticsearchRestTemplate elasticsearchTemplate;
 
 	private Date setupStartTime;
 	private Date setupEndTime;
 
 	private static final Long[] EMPTY_ARRAY = new Long[]{};
 
-	@Before
-	public void setUp() throws Exception {
+	@BeforeEach
+	void setUp() throws Exception {
 		branchService.deleteAll();
 		conceptService.deleteAll();
 
@@ -61,14 +58,7 @@ public class BranchReviewServiceTest extends AbstractTest {
 	}
 
 	@Test
-	public void testGetCreateReview() {
-		// Test that if a review exists the existing one can be found using the source and target branch state.
-		BranchReview review = reviewService.getCreateReview("MAIN", "MAIN/A");
-		assertNotNull(review);
-	}
-
-	@Test
-	public void testCreateMergeReview() throws InterruptedException, ServiceException {
+	void testCreateMergeReview() throws InterruptedException, ServiceException {
 		conceptService.create(new Concept(Concepts.SNOMEDCT_ROOT), "MAIN");
 		createConcept("116680003", "MAIN");
 		createConcept("10000200", "MAIN");
@@ -159,28 +149,29 @@ public class BranchReviewServiceTest extends AbstractTest {
 		assertEquals(0, versionsReplaced.getOrDefault(Concept.class.getSimpleName(), Collections.emptySet()).size());
 		assertEquals(1, versionsReplaced.getOrDefault(Description.class.getSimpleName(), Collections.emptySet()).size());
 
-		MergeReview review = reviewService.createMergeReview("MAIN", "MAIN/A");
+		MergeReview review = createMergeReviewAndWaitUntilCurrent("MAIN", "MAIN/A");
 
-		long maxWait = 10;
-		long cumulativeWait = 0;
-		while (review.getStatus() == ReviewStatus.PENDING && cumulativeWait < maxWait) {
-			Thread.sleep(1_000);
-			cumulativeWait++;
-		}
+		// Test that if a review exists the existing one can be found using the source and target branch state.
+//		assertEquals(review.getSourceToTargetReviewId(), reviewService.getCreateReview("MAIN", "MAIN/A").getId());
 
-		assertEquals(ReviewStatus.CURRENT, review.getStatus());
 		BranchReview sourceToTargetReview = reviewService.getBranchReview(review.getSourceToTargetReviewId());
 		assertReportEquals(sourceToTargetReview.getChangedConcepts(), new Long[]{10000100L, 10000200L, 10000300L, 10000400L, 10000500L, 10000600L, 700000000L, 800000000L, 900000000L});
 		BranchReview targetToSourceReview = reviewService.getBranchReview(review.getTargetToSourceReviewId());
 		assertReportEquals(targetToSourceReview.getChangedConcepts(), new Long[]{10000200L, 10000400L, 10000600L, 800000000L});
 
-		Collection<MergeReviewConceptVersions> mergeReviewConflictingConcepts = reviewService.getMergeReviewConflictingConcepts(review.getId(), DEFAULT_LANGUAGE_CODES);
+		Collection<MergeReviewConceptVersions> mergeReviewConflictingConcepts = reviewService.getMergeReviewConflictingConcepts(review.getId(), DEFAULT_LANGUAGE_DIALECTS);
 		Set<String> conceptIds = mergeReviewConflictingConcepts.stream().map(conceptVersions -> conceptVersions.getSourceConcept().getId()).collect(Collectors.toCollection(TreeSet::new));
 		assertEquals("[10000200, 10000400, 10000600, 800000000]", conceptIds.toString());
+
+		// Check that the child to parent branch review has the same content after a rebase.
+		mergeService.mergeBranchSync("MAIN", "MAIN/A", Collections.emptySet());
+		review = createMergeReviewAndWaitUntilCurrent("MAIN", "MAIN/A");
+		targetToSourceReview = reviewService.getBranchReview(review.getTargetToSourceReviewId());
+		assertReportEquals(targetToSourceReview.getChangedConcepts(), new Long[]{10000200L, 10000400L, 10000600L, 800000000L});
 	}
 
 	@Test
-	public void testConflictsFoundOnMidLevelBranches() throws InterruptedException, ServiceException {
+	void testConflictsFoundOnMidLevelBranches() throws InterruptedException, ServiceException {
 		// The story:
 		// Make change on third level branch MAIN/A/A1
 		// Promote to second level MAIN/A
@@ -222,28 +213,19 @@ public class BranchReviewServiceTest extends AbstractTest {
 		mergeService.mergeBranchSync("MAIN/B/B1", "MAIN/B", Collections.emptySet());
 		mergeService.mergeBranchSync("MAIN/B", "MAIN", Collections.emptySet());
 
-		MergeReview review = reviewService.createMergeReview("MAIN", "MAIN/A");
-
-		long maxWait = 10;
-		long cumulativeWait = 0;
-		while (review.getStatus() == ReviewStatus.PENDING && cumulativeWait < maxWait) {
-			Thread.sleep(1_000);
-			cumulativeWait++;
-		}
-
-		assertEquals(ReviewStatus.CURRENT, review.getStatus());
+		MergeReview review = createMergeReviewAndWaitUntilCurrent("MAIN", "MAIN/A");
 		BranchReview sourceToTargetReview = reviewService.getBranchReview(review.getSourceToTargetReviewId());
 		assertReportEquals(sourceToTargetReview.getChangedConcepts(), new Long[]{10000100L});
 		BranchReview targetToSourceReview = reviewService.getBranchReview(review.getTargetToSourceReviewId());
 		assertReportEquals(targetToSourceReview.getChangedConcepts(), new Long[]{10000100L});
 
-		Collection<MergeReviewConceptVersions> mergeReviewConflictingConcepts = reviewService.getMergeReviewConflictingConcepts(review.getId(), DEFAULT_LANGUAGE_CODES);
+		Collection<MergeReviewConceptVersions> mergeReviewConflictingConcepts = reviewService.getMergeReviewConflictingConcepts(review.getId(), DEFAULT_LANGUAGE_DIALECTS);
 		Set<String> conceptIds = mergeReviewConflictingConcepts.stream().map(conceptVersions -> conceptVersions.getSourceConcept().getId()).collect(Collectors.toCollection(TreeSet::new));
 		assertEquals("[10000100]", conceptIds.toString());
 	}
 
 	@Test
-	public void testCreateMergeReviewWithConceptDeletedOnParentAndFsnUpdatedOnChild() throws InterruptedException, ServiceException {
+	void testCreateMergeReviewWithConceptDeletedOnParentAndFsnUpdatedOnChild() throws InterruptedException, ServiceException {
 		// Update concept 10000100 FSN on A
 		Concept concept = conceptService.find("10000100", "MAIN/A");
 		getDescription(concept, true).setCaseSignificance("INITIAL_CHARACTER_CASE_INSENSITIVE");
@@ -252,25 +234,16 @@ public class BranchReviewServiceTest extends AbstractTest {
 		// Delete concept 10000100 on MAIN
 		conceptService.deleteConceptAndComponents("10000100", "MAIN", false);
 
-		MergeReview review = reviewService.createMergeReview("MAIN", "MAIN/A");
+		MergeReview review = createMergeReviewAndWaitUntilCurrent("MAIN", "MAIN/A");
 
-		long maxWait = 10;
-		long cumulativeWait = 0;
-		while (review.getStatus() == ReviewStatus.PENDING && cumulativeWait < maxWait) {
-			Thread.sleep(1_000);
-			cumulativeWait++;
-		}
-
-		assertEquals(ReviewStatus.CURRENT, review.getStatus());
-
-		Collection<MergeReviewConceptVersions> mergeReviewConflictingConcepts = reviewService.getMergeReviewConflictingConcepts(review.getId(), DEFAULT_LANGUAGE_CODES);
+		Collection<MergeReviewConceptVersions> mergeReviewConflictingConcepts = reviewService.getMergeReviewConflictingConcepts(review.getId(), DEFAULT_LANGUAGE_DIALECTS);
 		assertEquals(1, mergeReviewConflictingConcepts.size());
 		Set<String> conceptIds = mergeReviewConflictingConcepts.stream().map(conceptVersions -> conceptVersions.getTargetConcept().getId()).collect(Collectors.toSet());
 		assertTrue(conceptIds.contains("10000100"));
 	}
 
 	@Test
-	public void testCreateMergeReviewWithConceptDeletedOnParentAndSynonymUpdatedOnChild() throws InterruptedException, ServiceException {
+	void testCreateMergeReviewWithConceptDeletedOnParentAndSynonymUpdatedOnChild() throws InterruptedException, ServiceException {
 		// Update concept 10000100 FSN on A
 		Concept concept = conceptService.find("10000100", "MAIN/A");
 		getDescription(concept, false).setCaseSignificance("INITIAL_CHARACTER_CASE_INSENSITIVE");
@@ -279,23 +252,14 @@ public class BranchReviewServiceTest extends AbstractTest {
 		// Delete concept 10000100 on MAIN
 		conceptService.deleteConceptAndComponents("10000100", "MAIN", false);
 
-		MergeReview review = reviewService.createMergeReview("MAIN", "MAIN/A");
+		MergeReview review = createMergeReviewAndWaitUntilCurrent("MAIN", "MAIN/A");
 
-		long maxWait = 10;
-		long cumulativeWait = 0;
-		while (review.getStatus() == ReviewStatus.PENDING && cumulativeWait < maxWait) {
-			Thread.sleep(1_000);
-			cumulativeWait++;
-		}
-
-		assertEquals(ReviewStatus.CURRENT, review.getStatus());
-
-		Collection<MergeReviewConceptVersions> mergeReviewConflictingConcepts = reviewService.getMergeReviewConflictingConcepts(review.getId(), DEFAULT_LANGUAGE_CODES);
+		Collection<MergeReviewConceptVersions> mergeReviewConflictingConcepts = reviewService.getMergeReviewConflictingConcepts(review.getId(), DEFAULT_LANGUAGE_DIALECTS);
 		assertEquals(0, mergeReviewConflictingConcepts.size());
 	}
 
 	@Test
-	public void testCreateMergeReviewConceptDeletedOnChild() throws InterruptedException, ServiceException {
+	void testCreateMergeReviewConceptDeletedOnChild() throws InterruptedException, ServiceException {
 		// Update concept 10000100 description on A
 		Concept concept = conceptService.find("10000100", "MAIN");
 		getDescription(concept, true).setCaseSignificance("INITIAL_CHARACTER_CASE_INSENSITIVE");
@@ -304,25 +268,16 @@ public class BranchReviewServiceTest extends AbstractTest {
 		// Delete concept 10000100 on MAIN
 		conceptService.deleteConceptAndComponents("10000100", "MAIN/A", false);
 
-		MergeReview review = reviewService.createMergeReview("MAIN", "MAIN/A");
+		MergeReview review = createMergeReviewAndWaitUntilCurrent("MAIN", "MAIN/A");
 
-		long maxWait = 10;
-		long cumulativeWait = 0;
-		while (review.getStatus() == ReviewStatus.PENDING && cumulativeWait < maxWait) {
-			Thread.sleep(1_000);
-			cumulativeWait++;
-		}
-
-		assertEquals(ReviewStatus.CURRENT, review.getStatus());
-
-		Collection<MergeReviewConceptVersions> mergeReviewConflictingConcepts = reviewService.getMergeReviewConflictingConcepts(review.getId(), DEFAULT_LANGUAGE_CODES);
+		Collection<MergeReviewConceptVersions> mergeReviewConflictingConcepts = reviewService.getMergeReviewConflictingConcepts(review.getId(), DEFAULT_LANGUAGE_DIALECTS);
 		assertEquals(1, mergeReviewConflictingConcepts.size());
 		Set<String> conceptIds = mergeReviewConflictingConcepts.stream().map(conceptVersions -> conceptVersions.getSourceConcept().getId()).collect(Collectors.toSet());
 		assertTrue(conceptIds.contains("10000100"));
 	}
 
 	@Test
-	public void testCreateConceptChangeReportOnBranchSinceTimepoint() throws Exception {
+	void testCreateConceptChangeReportOnBranchSinceTimepoint() throws Exception {
 		// Assert report contains one new concept on MAIN since start of setup
 		assertReportEquals(reviewService.createConceptChangeReportOnBranchForTimeRange("MAIN", setupStartTime, now(), true), new Long[]{10000100L});
 
@@ -357,7 +312,7 @@ public class BranchReviewServiceTest extends AbstractTest {
 	}
 
 	@Test
-	public void testDescriptionUpdateOnSameBranchInChangeReport() throws Exception {
+	void testDescriptionUpdateOnSameBranchInChangeReport() throws Exception {
 		final String path = "MAIN";
 		createConcept("10000200", path);
 		createConcept("10000300", path);
@@ -376,7 +331,7 @@ public class BranchReviewServiceTest extends AbstractTest {
 	}
 
 	@Test
-	public void testDescriptionUpdateOnChildBranchInChangeReport() throws Exception {
+	void testDescriptionUpdateOnChildBranchInChangeReport() throws Exception {
 		final String path = "MAIN/A";
 		createConcept("10000200", path);
 		createConcept("10000300", path);
@@ -396,7 +351,7 @@ public class BranchReviewServiceTest extends AbstractTest {
 	}
 
 	@Test
-	public void testAxiomUpdateOnSameBranchInChangeReport() throws Exception {
+	void testAxiomUpdateOnSameBranchInChangeReport() throws Exception {
 		final String path = "MAIN";
 		createConcept("10000200", path);
 		createConcept("10000300", path);
@@ -415,7 +370,7 @@ public class BranchReviewServiceTest extends AbstractTest {
 	}
 
 	@Test
-	public void testAxiomUpdateOnSameBranchNotMAINInChangeReport() throws Exception {
+	void testAxiomUpdateOnSameBranchNotMAINInChangeReport() throws Exception {
 		final String path = "MAIN/A";
 		createConcept("10000200", path);
 		createConcept("10000300", path);
@@ -434,7 +389,7 @@ public class BranchReviewServiceTest extends AbstractTest {
 	}
 
 	@Test
-	public void testAxiomUpdateOnGrandfatherBranchInChangeReport() throws Exception {
+	void testAxiomUpdateOnGrandfatherBranchInChangeReport() throws Exception {
 		branchService.create("MAIN/A/B");
 
 		Date start = now();
@@ -458,7 +413,7 @@ public class BranchReviewServiceTest extends AbstractTest {
 	}
 
 	@Test
-	public void testAxiomUpdateOnChildBranchInChangeReport() throws Exception {
+	void testAxiomUpdateOnChildBranchInChangeReport() throws Exception {
 		final String path = "MAIN/A";
 		createConcept("10000200", path);
 		createConcept("10000300", path);
@@ -477,7 +432,7 @@ public class BranchReviewServiceTest extends AbstractTest {
 	}
 
 	@Test
-	public void testLangRefsetUpdateOnChildBranchInChangeReport() throws Exception {
+	void testLangRefsetUpdateOnChildBranchInChangeReport() throws Exception {
 		final String path = "MAIN/A";
 
 		Date start = now();
@@ -497,7 +452,7 @@ public class BranchReviewServiceTest extends AbstractTest {
 	}
 
 	@Test
-	public void testLangRefsetDeletionOnChildBranchInChangeReport() throws Exception {
+	void testLangRefsetDeletionOnChildBranchInChangeReport() throws Exception {
 		final String path = "MAIN/A";
 
 		Date start = now();
@@ -516,7 +471,7 @@ public class BranchReviewServiceTest extends AbstractTest {
 	}
 
 	@Test
-	public void testLangRefsetDeletionOnBranchInChangeReport() throws Exception {
+	void testLangRefsetDeletionOnBranchInChangeReport() throws Exception {
 		final String path = "MAIN";
 
 		Date start = now();
@@ -532,6 +487,20 @@ public class BranchReviewServiceTest extends AbstractTest {
 
 		// Concept updated from lang refset change
 		assertReportEquals(reviewService.createConceptChangeReportOnBranchForTimeRange(path, start, now(), true), new Long[] {10000100L});
+	}
+
+	private MergeReview createMergeReviewAndWaitUntilCurrent(String sourceBranch, String targetBranch) throws InterruptedException {
+		MergeReview review = reviewService.createMergeReview(sourceBranch, targetBranch);
+
+		long maxWait = 10;
+		long cumulativeWait = 0;
+		while (review.getStatus() == ReviewStatus.PENDING && cumulativeWait < maxWait) {
+			Thread.sleep(1_000);
+			cumulativeWait++;
+		}
+
+		assertEquals(ReviewStatus.CURRENT, review.getStatus());
+		return review;
 	}
 
 	private Date now() {

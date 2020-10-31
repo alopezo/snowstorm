@@ -9,8 +9,9 @@ public interface CodeSystemCreate {
 	String getShortName();
 	String getName();
 	String getCountryCode();
+	String getMaintainerType();
 	String getDefaultLanguageCode();
 	String[] getDefaultLanguageReferenceSets();
 	String getBranchPath();
-	Integer getDependantVersion();
+	Integer getDependantVersionEffectiveTime();
 }

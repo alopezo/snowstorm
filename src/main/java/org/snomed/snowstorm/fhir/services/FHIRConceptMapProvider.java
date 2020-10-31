@@ -10,6 +10,7 @@ import org.snomed.snowstorm.core.data.domain.ReferenceSetMember;
 import org.snomed.snowstorm.core.data.services.ReferenceSetMemberService;
 import org.snomed.snowstorm.core.data.services.pojo.MemberSearchRequest;
 import org.snomed.snowstorm.fhir.config.FHIRConstants;
+import org.snomed.snowstorm.fhir.domain.BranchPath;
 import org.snomed.snowstorm.rest.ControllerHelper;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.domain.Page;
@@ -32,6 +33,9 @@ public class FHIRConceptMapProvider implements IResourceProvider, FHIRConstants 
 	@Autowired
 	private HapiParametersMapper mapper;
 	
+	@Autowired
+	private FHIRHelper fhirHelper;
+	
 	private static int DEFAULT_PAGESIZE = 1000;
 	
 	private BiMap<String, String> knownUriMap;
@@ -39,26 +43,23 @@ public class FHIRConceptMapProvider implements IResourceProvider, FHIRConstants 
 	String[] validMapSources;
 	
 	@Operation(name="$translate", idempotent=true)
-	public Parameters expand(
+	public Parameters translate(
 			HttpServletRequest request,
 			HttpServletResponse response,
 			@OperationParam(name="url") String url,
 			@OperationParam(name="system") UriType system,
 			@OperationParam(name="code") CodeType code,
+			@OperationParam(name="version") StringType version,
 			@OperationParam(name="source") UriType source,
 			@OperationParam(name="target") UriType target) throws FHIROperationException {
-
+		fhirHelper.required("source", source);
+		fhirHelper.required("target", target);
 		validate("System", system.asStringValue(), Validation.EQUALS, getValidMapSources(), true);
 		validate("Source", source.asStringValue(), Validation.STARTS_WITH, getValidMapSources(), true);
 		validate("Target", target.asStringValue(), Validation.EQUALS, getValidMapTargets(), true);
-		
-		//Allow "ICD-10", but swap with the real URI
-		if (target.asStringValue().equals(ICD10)) {
-			target = new UriType(ICD10_URI);
-		}
-		if (source.asStringValue().equals(ICD10) ) {
-			source = new UriType(ICD10_URI);
-		}
+		fhirHelper.notSupported("version", version);
+		normaliseURIs(source, target, ICD10, ICD10_URI);
+		normaliseURIs(source, target, ICDO, ICDO_URI);
 		
 		if (!source.asStringValue().startsWith(SNOMED_URI) && source.asStringValue().equals(target.asStringValue())) {
 			throw new FHIROperationException (null, "Source and target cannot be the same: '" + source.asStringValue() + "'");
@@ -66,8 +67,12 @@ public class FHIRConceptMapProvider implements IResourceProvider, FHIRConstants 
 		
 		String refsetId = "";
 		if (url != null) {
-			validate("Url", url, Validation.STARTS_WITH, SNOMED_CONCEPTMAP, true);
-			refsetId = url.substring(SNOMED_CONCEPTMAP.length());
+			validate("Url", url, Validation.STARTS_WITH, SNOMED_URI, true);
+			int idx = url.indexOf(MAP_INDICATOR);
+			if (idx == NOT_SET) {
+				throw new FHIROperationException (IssueType.INCOMPLETE, "url parameter is expected to contain '"+ MAP_INDICATOR +"' indicating the refset sctid of the map to be used.");
+			}
+			refsetId = url.substring(idx + MAP_INDICATOR.length());
 		}
 		
 		//If a refset is specified does that match the target system?
@@ -88,26 +93,55 @@ public class FHIRConceptMapProvider implements IResourceProvider, FHIRConstants 
 		} else {
 			memberSearchRequest.referencedComponentId(code.getCode());
 		}
+		
+		//The code system is the URL up to where the parameters start eg http://snomed.info/sct?fhir_cm=447562003
+		//These calls will also set the branchPath
+		BranchPath branchPath = new BranchPath();
+		int cutPoint = url == null ? -1 : url.indexOf("?");
+		if (cutPoint == NOT_SET) {
+			if (url == null) {
+				branchPath.set(MAIN);
+			} else {
+				throw new FHIROperationException (IssueType.INCOMPLETE, "url parameter is expected to contain a parameter indicating the refset id of the map to be used");
+			}
+		} else {
+			StringType codeSystemVersionUri = new StringType(url.substring(0, cutPoint));
+			branchPath.set(fhirHelper.getBranchPathFromURI(codeSystemVersionUri));
+		}
 
 		Page<ReferenceSetMember> members = memberService.findMembers(
-				BranchPathUriUtil.decodePath(MAIN),
+				branchPath.toString(),
 				memberSearchRequest,
 				ControllerHelper.getPageRequest(0, DEFAULT_PAGESIZE));
 		return mapper.mapToFHIR(members.getContent(), target, knownUriMap);
 
 	}
 	
+	private void normaliseURIs(UriType source, UriType target, String shortName, String uri) {
+		//Allow shortNames to be input, but swap with the real URI
+		if (target.asStringValue().equals(shortName)) {
+			target = new UriType(uri);
+		}
+		if (source.asStringValue().equals(shortName) ) {
+			source = new UriType(uri);
+		}
+		
+	}
+
 	private String[] getValidMapTargets() {
 		if (validMapTargets == null) {
-			validMapTargets = new String[4];
+			validMapTargets = new String[6];
 			validMapTargets[0] = SNOMED_URI + "?fhir_vs";
-			validMapTargets[1] = "ICD-10";
+			validMapTargets[1] = ICD10;
 			validMapTargets[2] = ICD10_URI;
 			validMapTargets[3] = SNOMED_URI;
+			validMapTargets[4] = ICDO;
+			validMapTargets[5] = ICDO_URI;
 			
 			//This hardcoding will be replaced by machine readable Refset metadata
 			knownUriMap = new ImmutableBiMap.Builder<String, String>()
 			.put(ICD10_URI, "447562003")
+			.put(ICDO_URI, "446608001")
 			.put("CTV-3","900000000000497000")
 			.build();
 		}

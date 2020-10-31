@@ -4,10 +4,13 @@ import io.kaicode.elasticvc.api.BranchNotFoundException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.snomed.snowstorm.core.data.services.NotFoundException;
+import org.snomed.snowstorm.core.data.services.TooCostlyException;
 import org.springframework.http.HttpStatus;
+import org.springframework.security.access.AccessDeniedException;
 import org.springframework.web.HttpMediaTypeNotSupportedException;
 import org.springframework.web.HttpRequestMethodNotSupportedException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
+import org.springframework.web.bind.MissingServletRequestParameterException;
 import org.springframework.web.bind.annotation.ControllerAdvice;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.ResponseBody;
@@ -28,7 +31,8 @@ public class RestControllerAdvice {
 			HttpRequestMethodNotSupportedException.class,
 			HttpMediaTypeNotSupportedException.class,
 			MethodArgumentNotValidException.class,
-			MethodArgumentTypeMismatchException.class
+			MethodArgumentTypeMismatchException.class,
+			MissingServletRequestParameterException.class
 	})
 	@ResponseStatus(HttpStatus.BAD_REQUEST)
 	@ResponseBody
@@ -41,12 +45,35 @@ public class RestControllerAdvice {
 		return result;
 	}
 
+	@ExceptionHandler(TooCostlyException.class)
+	@ResponseStatus(HttpStatus.UNPROCESSABLE_ENTITY)
+	@ResponseBody
+	public Map<String,Object> handleTooExpensiveException(TooCostlyException exception) {
+		HashMap<String, Object> result = new HashMap<>();
+		result.put("error", HttpStatus.UNPROCESSABLE_ENTITY);
+		result.put("message", exception.getMessage());
+		logger.info("Too Costly request {}", exception.getMessage());
+		logger.debug("Too Costly request {}", exception.getMessage(), exception);
+		return result;
+	}
+
 	@ExceptionHandler({BranchNotFoundException.class, NotFoundException.class})
 	@ResponseStatus(HttpStatus.NOT_FOUND)
 	@ResponseBody
 	public Map<String,Object> handleNotFoundException(Exception exception) {
 		HashMap<String, Object> result = new HashMap<>();
 		result.put("error", HttpStatus.NOT_FOUND);
+		result.put("message", exception.getMessage());
+		logger.debug("Not Found {}", exception.getMessage(), exception);
+		return result;
+	}
+
+	@ExceptionHandler(AccessDeniedException.class)
+	@ResponseStatus(HttpStatus.FORBIDDEN)
+	@ResponseBody
+	public Map<String,Object> handleAccessDeniedException(AccessDeniedException exception) {
+		HashMap<String, Object> result = new HashMap<>();
+		result.put("error", HttpStatus.FORBIDDEN);
 		result.put("message", exception.getMessage());
 		return result;
 	}

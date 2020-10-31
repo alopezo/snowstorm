@@ -5,9 +5,9 @@ import io.kaicode.elasticvc.api.BranchService;
 import io.kaicode.elasticvc.domain.Branch;
 import org.ihtsdo.otf.snomedboot.ReleaseImportException;
 import org.junit.Assert;
-import org.junit.Before;
-import org.junit.Test;
-import org.junit.runner.RunWith;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.snomed.otf.snomedboot.testutil.ZipUtil;
 import org.snomed.snowstorm.AbstractTest;
 import org.snomed.snowstorm.TestConfig;
@@ -19,7 +19,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.test.context.ContextConfiguration;
-import org.springframework.test.context.junit4.SpringJUnit4ClassRunner;
+import org.springframework.test.context.junit.jupiter.SpringExtension;
 
 import java.io.*;
 import java.util.*;
@@ -27,10 +27,11 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
 import static org.junit.Assert.*;
+import static org.snomed.snowstorm.mrcm.MRCMUpdateService.DISABLE_MRCM_AUTO_UPDATE_METADATA_KEY;
 
-@RunWith(SpringJUnit4ClassRunner.class)
+@ExtendWith(SpringExtension.class)
 @ContextConfiguration(classes = TestConfig.class)
-public class ImportServiceTest extends AbstractTest {
+class ImportServiceTest extends AbstractTest {
 
 	@Autowired
 	private ImportService importService;
@@ -59,8 +60,8 @@ public class ImportServiceTest extends AbstractTest {
 	private File rf2Archive;
 	private File completeOwlRf2Archive;
 
-	@Before
-	public void setup() throws IOException {
+	@BeforeEach
+	void setup() throws IOException {
 		codeSystemService.init();
 		referenceSetMemberService.init();
 		rf2Archive = ZipUtil.zipDirectoryRemovingCommentsAndBlankLines("src/main/resources/dummy-snomed-content/RF2Release");
@@ -68,7 +69,7 @@ public class ImportServiceTest extends AbstractTest {
 	}
 
 	@Test
-	public void testImportFull() throws ReleaseImportException, FileNotFoundException, ServiceException {
+	void testImportFull() throws ReleaseImportException, FileNotFoundException, ServiceException {
 		final String branchPath = "MAIN";
 		Assert.assertEquals(1, branchService.findAll().size());
 
@@ -236,11 +237,11 @@ public class ImportServiceTest extends AbstractTest {
 	}
 
 	@Test
-	public void testImportSnapshotThenDelta() throws ReleaseImportException, FileNotFoundException {
+	void testImportSnapshotThenDelta() throws ReleaseImportException, FileNotFoundException {
 		final String branchPath = "MAIN";
 
 		assertNotNull(codeSystemService.find(CodeSystemService.SNOMEDCT));
-		assertTrue(codeSystemService.findAllVersions(CodeSystemService.SNOMEDCT).isEmpty());
+		assertTrue(codeSystemService.findAllVersions(CodeSystemService.SNOMEDCT, true).isEmpty());
 
 		String importId = importService.createJob(RF2Type.SNAPSHOT, branchPath, true, false);
 		importService.importArchive(importId, new FileInputStream(rf2Archive));
@@ -308,7 +309,7 @@ public class ImportServiceTest extends AbstractTest {
 		final Description inactiveDescription = inactiveConcept.getDescription("697843019");
 		Assert.assertEquals("CONCEPT_NON_CURRENT", inactiveDescription.getInactivationIndicator());
 
-		List<CodeSystemVersion> allVersions = codeSystemService.findAllVersions(CodeSystemService.SNOMEDCT);
+		List<CodeSystemVersion> allVersions = codeSystemService.findAllVersions(CodeSystemService.SNOMEDCT, true);
 		assertEquals(1, allVersions.size());
 		CodeSystemVersion codeSystemVersion = allVersions.get(0);
 		assertEquals("SNOMEDCT", codeSystemVersion.getShortName());
@@ -331,11 +332,11 @@ public class ImportServiceTest extends AbstractTest {
 	}
 
 	@Test
-	public void testImportSnapshotThenUpgradeToCompleteOWL() throws ReleaseImportException, FileNotFoundException {
+	void testImportSnapshotThenUpgradeToCompleteOWL() throws ReleaseImportException, FileNotFoundException {
 		final String branchPath = "MAIN";
 
 		assertNotNull(codeSystemService.find(CodeSystemService.SNOMEDCT));
-		assertTrue(codeSystemService.findAllVersions(CodeSystemService.SNOMEDCT).isEmpty());
+		assertTrue(codeSystemService.findAllVersions(CodeSystemService.SNOMEDCT, true).isEmpty());
 
 
 		// Import Snapshot using Stated Relationships
@@ -376,11 +377,11 @@ public class ImportServiceTest extends AbstractTest {
 	}
 
 	@Test
-	public void testImportSnapshotOnlyModelModule() throws ReleaseImportException, FileNotFoundException, ServiceException {
+	void testImportSnapshotOnlyModelModule() throws ReleaseImportException, FileNotFoundException, ServiceException {
 		final String branchPath = "MAIN";
 
 		assertNotNull(codeSystemService.find(CodeSystemService.SNOMEDCT));
-		assertTrue(codeSystemService.findAllVersions(CodeSystemService.SNOMEDCT).isEmpty());
+		assertTrue(codeSystemService.findAllVersions(CodeSystemService.SNOMEDCT, true).isEmpty());
 
 		RF2ImportConfiguration importConfiguration = new RF2ImportConfiguration(RF2Type.SNAPSHOT, branchPath);
 		importConfiguration.setModuleIds(Collections.singleton(Concepts.MODEL_MODULE));
@@ -398,7 +399,7 @@ public class ImportServiceTest extends AbstractTest {
 	}
 
 	@Test
-	public void testImportOnlyComponentsWithBlankOrLaterEffectiveTime() throws IOException, ReleaseImportException {
+	void testImportOnlyComponentsWithBlankOrLaterEffectiveTime() throws IOException, ReleaseImportException {
 
 		// The content in these zips is not correct or meaningful. We are just using rows to test how the import function behaves with effectiveTimes.
 
@@ -490,9 +491,8 @@ public class ImportServiceTest extends AbstractTest {
 
 
 	@Test
-	public void testImportWithEffectiveTimeCleared() throws IOException, ReleaseImportException {
+	void testImportWithEffectiveTimeCleared() throws IOException, ReleaseImportException {
 		// The content in these zips is for the daily build and the effective time needs to be cleared
-
 		File zipFile = ZipUtil.zipDirectoryRemovingCommentsAndBlankLines("src/test/resources/dummy-daily-build/DailyBuild_Day1");
 		String importId = importService.createJob(RF2Type.DELTA, "MAIN", false, true);
 		importService.importArchive(importId, new FileInputStream(zipFile));
@@ -504,10 +504,75 @@ public class ImportServiceTest extends AbstractTest {
 		assertFalse(concept.isReleased());
 		assertNull(concept.getReleasedEffectiveTime());
 
+	}
+
+	@Test
+	void testImportWithBlankEffectiveTime() throws IOException, ReleaseImportException {
+
+		File zipFile = ZipUtil.zipDirectoryRemovingCommentsAndBlankLines("src/test/resources/import-tests/blankEffectiveTimeTest");
+		String importId = importService.createJob(RF2Type.DELTA, "MAIN", false, false);
+		importService.importArchive(importId, new FileInputStream(zipFile));
+
+		List<Concept> concepts = conceptService.findAll("MAIN", PageRequest.of(0, 10)).getContent();
+		assertEquals(5, concepts.size());
+		Concept concept = conceptService.find("100000000", "MAIN");
+		assertNull(concept.getEffectiveTime());
+		assertFalse(concept.isReleased());
+		assertNull(concept.getReleasedEffectiveTime());
+		assertNull(concept.getReleaseHash());
+		assertNull(concept.getEffectiveTimeI());
+
+		Set<Description> descriptions = concept.getDescriptions();
+		assertNotNull(descriptions);
+		assertEquals(1, descriptions.size());
+		Description description = descriptions.iterator().next();
+		assertNull(description.getEffectiveTime());
+		assertNull(description.getEffectiveTimeI());
+		assertNull(description.getReleaseHash());
+		assertFalse(description.isReleased());
+		assertNull(description.getReleasedEffectiveTime());
+
+		Relationship relationship = relationshipService.findRelationship("MAIN", "200000020");
+		assertNotNull(relationship);
+		assertFalse(relationship.isReleased());
+		assertNull(relationship.getEffectiveTimeI());
+		assertNull(relationship.getEffectiveTime());
+		assertNull(relationship.getReleaseHash());
+
+		ReferenceSetMember referenceSetMember = referenceSetMemberService.findMember("MAIN", "009c6780-97ff-5298-8c6d-37df7b41838e");
+		assertNotNull(referenceSetMember);
+		assertFalse(referenceSetMember.isReleased());
+		assertNull(referenceSetMember.getReleaseHash());
+		assertNull(referenceSetMember.getEffectiveTimeI());
+		assertNull(referenceSetMember.getReleasedEffectiveTime());
+		assertNull(referenceSetMember.getEffectiveTime());
+
 
 	}
 
-		private void collectContentCounts(List<Concept> concepts, Map<String, AtomicInteger> conceptDefinitionStatuses, Map<String, AtomicInteger> descriptionCaseSignificance, Map<String, AtomicInteger> descriptionAcceptability, Map<Integer, AtomicInteger> relationshipGroups) {
+	@Test
+	void testImportMemberWithMultipleBlankTrailingFields() throws IOException, ReleaseImportException {
+		File zipFile = ZipUtil.zipDirectoryRemovingCommentsAndBlankLines("src/test/resources/import-tests/multipleTrailingBlankFields");
+		String importId = importService.createJob(RF2Type.DELTA, "MAIN", false, false);
+		importService.importArchive(importId, new FileInputStream(zipFile));
+
+		ReferenceSetMember member = referenceSetMemberService.findMember("MAIN", "3afa8ba9-6196-4792-afd0-224450e79166");
+		assertNotNull(member);
+	}
+
+	@Test
+	void testSimplestRefsetImport() throws IOException, ReleaseImportException {
+		assertNull(referenceSetMemberService.findMember("MAIN", "01a78d22-ad0b-5e76-8fd4-9fed481e5de5"));
+
+		File zipFile = ZipUtil.zipDirectoryRemovingCommentsAndBlankLines("src/test/resources/import-tests/refset-snapshot-import");
+		String importId = importService.createJob(RF2Type.SNAPSHOT, "MAIN", false, false);
+		importService.importArchive(importId, new FileInputStream(zipFile));
+
+		assertNotNull(referenceSetMemberService.findMember("MAIN", "01a78d22-ad0b-5e76-8fd4-9fed481e5de5"));
+		assertFalse(branchService.findLatest("MAIN").getMetadata().containsKey(DISABLE_MRCM_AUTO_UPDATE_METADATA_KEY));
+	}
+
+	private void collectContentCounts(List<Concept> concepts, Map<String, AtomicInteger> conceptDefinitionStatuses, Map<String, AtomicInteger> descriptionCaseSignificance, Map<String, AtomicInteger> descriptionAcceptability, Map<Integer, AtomicInteger> relationshipGroups) {
 		conceptDefinitionStatuses.clear();
 		descriptionCaseSignificance.clear();
 		descriptionAcceptability.clear();

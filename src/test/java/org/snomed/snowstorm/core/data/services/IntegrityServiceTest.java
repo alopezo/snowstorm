@@ -1,9 +1,10 @@
 package org.snomed.snowstorm.core.data.services;
 
 import io.kaicode.elasticvc.api.BranchService;
+import io.kaicode.elasticvc.domain.Branch;
 import io.kaicode.elasticvc.domain.Commit;
-import org.junit.Test;
-import org.junit.runner.RunWith;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.snomed.snowstorm.AbstractTest;
 import org.snomed.snowstorm.TestConfig;
 import org.snomed.snowstorm.core.data.domain.Concept;
@@ -12,16 +13,17 @@ import org.snomed.snowstorm.core.data.domain.Relationship;
 import org.snomed.snowstorm.core.data.services.pojo.IntegrityIssueReport;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.test.context.ContextConfiguration;
-import org.springframework.test.context.junit4.SpringJUnit4ClassRunner;
+import org.springframework.test.context.junit.jupiter.SpringExtension;
 
 import java.util.*;
 import java.util.stream.Collectors;
 
 import static org.junit.Assert.*;
+import static org.snomed.snowstorm.core.data.services.BranchMetadataHelper.INTERNAL_METADATA_KEY;
 
-@RunWith(SpringJUnit4ClassRunner.class)
+@ExtendWith(SpringExtension.class)
 @ContextConfiguration(classes = TestConfig.class)
-public class IntegrityServiceTest extends AbstractTest {
+class IntegrityServiceTest extends AbstractTest {
 
 	@Autowired
 	private BranchService branchService;
@@ -41,11 +43,14 @@ public class IntegrityServiceTest extends AbstractTest {
 	@Autowired
 	private RelationshipService relationshipService;
 
+	@Autowired
+	private BranchMetadataHelper branchMetadataHelper;
+
 	@Test
 	/*
 		Test the method that checks all the components visible on the branch.
 	 */
-	public void testFindAllComponentsWithBadIntegrity() throws ServiceException {
+	void testFindAllComponentsWithBadIntegrity() throws ServiceException {
 		branchService.create("MAIN/project");
 
 		branchService.create("MAIN/project/test1");
@@ -137,7 +142,7 @@ public class IntegrityServiceTest extends AbstractTest {
 		Test the method that checks only the components changed on the branch.
 		The purpose of this method is to check only what's changed for speed but to block promotion until changes are fixed.
 	 */
-	public void testFindChangedComponentsWithBadIntegrity() throws ServiceException {
+	void testFindChangedComponentsWithBadIntegrity() throws ServiceException {
 		branchService.create("MAIN/project");
 
 		branchService.create("MAIN/project/test1");
@@ -223,8 +228,64 @@ public class IntegrityServiceTest extends AbstractTest {
 		assertEquals("[100005]", getAxiomReferencedConcepts(reportProjectTest2Run2));
 	}
 
+	@SuppressWarnings("unchecked")
 	public String getAxiomReferencedConcepts(IntegrityIssueReport reportProject) {
-		return Arrays.toString(reportProject.getAxiomsWithMissingOrInactiveReferencedConcept().values().stream().flatMap(Collection::stream).sorted().toArray());
+		return Arrays.toString(reportProject.getAxiomsWithMissingOrInactiveReferencedConcept().values().stream()
+				.map(conceptMini -> (Set<Long>)conceptMini.getExtraFields().get("missingOrInactiveConcepts")).flatMap(Collection::stream).sorted().toArray());
 	}
 
+	@Test
+	void testIntegrityCommitHook() throws Exception {
+		String path = "MAIN/project";
+		Branch branch = branchService.create(path);
+		// invalid relationship
+		conceptService.create(new Concept("10000101").addRelationship(new Relationship("100002", "100001")), path);
+
+		// Two bad relationships are on project
+		IntegrityIssueReport reportProject = integrityService.findChangedComponentsWithBadIntegrity(branchService.findLatest(path));
+		assertNull(reportProject.getRelationshipsWithMissingOrInactiveSource());
+		assertEquals(1, reportProject.getRelationshipsWithMissingOrInactiveType().size());
+		assertEquals(1, reportProject.getRelationshipsWithMissingOrInactiveDestination().size());
+
+		Map<String, String> metaData = branch.getMetadata();
+		Map<String, Object> metaDataExpanded = metaData == null ? new HashMap<>() : branchMetadataHelper.expandObjectValues(metaData);
+		metaDataExpanded.put("existingConfig", "test");
+		Map<String, String> integrityIssueMetaData = new HashMap<>();
+		integrityIssueMetaData.put(IntegrityService.INTEGRITY_ISSUE_METADATA_KEY, "true");
+		integrityIssueMetaData.put("other_key", "something else");
+		metaDataExpanded.put(INTERNAL_METADATA_KEY, integrityIssueMetaData);
+		branchService.updateMetadata(branch.getPath(), branchMetadataHelper.flattenObjectValues(metaDataExpanded));
+
+		branch = branchService.findLatest(path);
+		assertNotNull(branch.getMetadata());
+		metaDataExpanded = branchMetadataHelper.expandObjectValues(branch.getMetadata());
+		assertTrue(metaDataExpanded.containsKey(INTERNAL_METADATA_KEY));
+		String integrityIssueFound = ((Map<String, String>) metaDataExpanded.get(INTERNAL_METADATA_KEY)).get(IntegrityService.INTEGRITY_ISSUE_METADATA_KEY);
+		assertTrue(Boolean.valueOf(integrityIssueFound));
+
+		// partial fix
+		conceptService.create(new Concept("100001"), path);
+		branch = branchService.findLatest(path);
+		reportProject = integrityService.findChangedComponentsWithBadIntegrity(branch);
+		assertFalse(reportProject.isEmpty());
+		assertNotNull(branch.getMetadata());
+		metaDataExpanded = branchMetadataHelper.expandObjectValues(branch.getMetadata());
+		assertTrue(metaDataExpanded.containsKey(INTERNAL_METADATA_KEY));
+		integrityIssueFound = ((Map<String, String>) metaDataExpanded.get(INTERNAL_METADATA_KEY)).get(IntegrityService.INTEGRITY_ISSUE_METADATA_KEY);
+		assertTrue(Boolean.valueOf(integrityIssueFound));
+
+		// complete fix
+		conceptService.create(new Concept("100002"), path);
+		branch = branchService.findLatest(path);
+		reportProject = integrityService.findChangedComponentsWithBadIntegrity(branch);
+		assertTrue(reportProject.isEmpty());
+		assertNotNull(branch.getMetadata());
+		metaDataExpanded = branchMetadataHelper.expandObjectValues(branch.getMetadata());
+		assertTrue(metaDataExpanded.containsKey(INTERNAL_METADATA_KEY));
+		Map<String, String> internalExpanded = (Map<String, String>) branchMetadataHelper.expandObjectValues(branch.getMetadata()).get(INTERNAL_METADATA_KEY);
+		assertFalse(internalExpanded.containsKey(IntegrityService.INTEGRITY_ISSUE_METADATA_KEY));
+		assertTrue(internalExpanded.containsKey("other_key"));
+		assertTrue(metaDataExpanded.containsKey("existingConfig"));
+
+	}
 }

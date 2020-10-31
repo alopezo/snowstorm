@@ -2,12 +2,14 @@ package org.snomed.snowstorm.core.data.services;
 
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Sets;
+import io.kaicode.elasticvc.api.BranchService;
 import io.kaicode.elasticvc.api.ComponentService;
 import io.kaicode.elasticvc.api.VersionControlHelper;
 import io.kaicode.elasticvc.domain.Commit;
 import io.kaicode.elasticvc.domain.DomainEntity;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.snomed.snowstorm.config.Config;
 import org.snomed.snowstorm.config.SearchLanguagesConfiguration;
 import org.snomed.snowstorm.core.data.domain.*;
 import org.snomed.snowstorm.core.data.repositories.*;
@@ -18,9 +20,9 @@ import org.snomed.snowstorm.core.util.DescriptionHelper;
 import org.snomed.snowstorm.core.util.MapUtil;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.elasticsearch.core.ElasticsearchOperations;
+import org.springframework.data.elasticsearch.core.SearchHitsIterator;
 import org.springframework.data.elasticsearch.core.query.NativeSearchQuery;
 import org.springframework.data.elasticsearch.core.query.NativeSearchQueryBuilder;
-import org.springframework.data.util.CloseableIterator;
 import org.springframework.stereotype.Service;
 
 import java.util.*;
@@ -31,6 +33,7 @@ import java.util.stream.Stream;
 import static org.elasticsearch.index.query.QueryBuilders.boolQuery;
 import static org.elasticsearch.index.query.QueryBuilders.termsQuery;
 import static org.snomed.snowstorm.core.data.domain.Concepts.inactivationIndicatorNames;
+import static org.snomed.snowstorm.core.data.services.ConceptService.DISABLE_CONTENT_AUTOMATIONS_METADATA_KEY;
 
 @Service
 public class ConceptUpdateHelper extends ComponentService {
@@ -71,6 +74,9 @@ public class ConceptUpdateHelper extends ComponentService {
 	@Autowired
 	private ValidatorService validatorService;
 
+	@Autowired
+	private BranchService branchService;
+
 	private Logger logger = LoggerFactory.getLogger(getClass());
 
 	PersistedComponents saveNewOrUpdatedConcepts(Collection<Concept> concepts, Commit commit, Map<String, Concept> existingConceptsMap) throws ServiceException {
@@ -78,7 +84,12 @@ public class ConceptUpdateHelper extends ComponentService {
 
 		validateConcepts(concepts);
 
-		IdentifierReservedBlock reservedIds = identifierService.reserveIdentifierBlock(concepts);
+		// Grab branch metadata including values inherited from ancestor branches
+		Map<String, String> metadata = branchService.findBranchOrThrow(commit.getBranch().getPath(), true).getMetadata();
+		String defaultModuleId = metadata != null ? metadata.get(Config.DEFAULT_MODULE_ID_KEY) : null;
+		String defaultNamespace = metadata != null ? metadata.get(Config.DEFAULT_NAMESPACE_KEY) : null;
+		boolean enableContentAutomations = metadata == null || !"true".equals(metadata.get(DISABLE_CONTENT_AUTOMATIONS_METADATA_KEY));
+		IdentifierReservedBlock reservedIds = identifierService.reserveIdentifierBlock(concepts, defaultNamespace);
 
 		// Assign identifiers to new concepts
 		concepts.stream()
@@ -96,19 +107,21 @@ public class ConceptUpdateHelper extends ComponentService {
 			final Map<String, Description> existingDescriptions = new HashMap<>();
 			final Set<ReferenceSetMember> newVersionOwlAxiomMembers = concept.getAllOwlAxiomMembers();
 
-			if (concept.isActive()) {
-				// Clear inactivation refsets
-				concept.setInactivationIndicator(null);
-				concept.setAssociationTargets(null);
-			} else {
-				// Make stated relationships and axioms inactive
-				concept.getRelationships().forEach(relationship -> {
-					if (Concepts.STATED_RELATIONSHIP.equals(relationship.getCharacteristicTypeId())) {
-						relationship.setActive(false);
-					}
-				});
-				newVersionOwlAxiomMembers.forEach(axiom -> axiom.setActive(false));
-				concept.getDescriptions().forEach(description -> description.setInactivationIndicator(inactivationIndicatorNames.get(Concepts.CONCEPT_NON_CURRENT)));
+			if (enableContentAutomations) {
+				if (concept.isActive()) {
+					// Clear inactivation refsets
+					concept.setInactivationIndicator(null);
+					concept.setAssociationTargets(null);
+				} else {
+					// Make stated relationships and axioms inactive
+					concept.getRelationships().forEach(relationship -> {
+						if (Concepts.STATED_RELATIONSHIP.equals(relationship.getCharacteristicTypeId())) {
+							relationship.setActive(false);
+						}
+					});
+					newVersionOwlAxiomMembers.forEach(axiom -> axiom.setActive(false));
+					concept.getDescriptions().forEach(description -> description.setInactivationIndicator(inactivationIndicatorNames.get(Concepts.CONCEPT_NON_CURRENT)));
+				}
 			}
 
 			// Mark changed concepts as changed
@@ -189,8 +202,8 @@ public class ConceptUpdateHelper extends ComponentService {
 							member.setChanged(true);
 							member.copyReleaseDetails(existingMember);
 							member.updateEffectiveTime();
-							refsetMembersToPersist.add(member);
 						}
+						refsetMembersToPersist.add(member);
 						existingMembersToMatch.remove(languageRefsetId);
 					} else {
 						final ReferenceSetMember member = new ReferenceSetMember(description.getModuleId(), languageRefsetId, description.getId());
@@ -207,8 +220,12 @@ public class ConceptUpdateHelper extends ComponentService {
 					}
 				}
 			}
+
+			// Apply relationship source ids
 			concept.getRelationships()
 					.forEach(relationship -> relationship.setSourceId(concept.getConceptId()));
+
+			// Set new relationship ids
 			concept.getRelationships().stream()
 					.filter(relationship -> relationship.getRelationshipId() == null)
 					.forEach(relationship -> relationship.setRelationshipId(reservedIds.getNextId(ComponentType.Relationship).toString()));
@@ -221,6 +238,14 @@ public class ConceptUpdateHelper extends ComponentService {
 			refsetMembersToPersist.addAll(newVersionOwlAxiomMembers);
 			concept.getClassAxioms().clear();
 			concept.getGciAxioms().clear();
+		}
+
+		// Apply default module to changed components
+		if (defaultModuleId != null) {
+			concepts.stream().filter(DomainEntity::isChanged).forEach(e -> e.setModuleId(defaultModuleId));
+			descriptionsToPersist.stream().filter(DomainEntity::isChanged).forEach(e -> e.setModuleId(defaultModuleId));
+			relationshipsToPersist.stream().filter(DomainEntity::isChanged).forEach(e -> e.setModuleId(defaultModuleId));
+			refsetMembersToPersist.stream().filter(DomainEntity::isChanged).forEach(e -> e.setModuleId(defaultModuleId));
 		}
 
 		// TODO: Try saving all core component types at once - Elasticsearch likes multi-threaded writes.
@@ -427,7 +452,7 @@ public class ConceptUpdateHelper extends ComponentService {
 		doSaveBatchComponents(queryConcepts, commit, QueryConcept.Fields.CONCEPT_ID_FORM, queryConceptRepository);
 	}
 
-	private void doDeleteMembersWhereReferencedComponentDeleted(Set<String> entityVersionsDeleted, Commit commit) {
+	void doDeleteMembersWhereReferencedComponentDeleted(Set<String> entityVersionsDeleted, Commit commit) {
 		NativeSearchQuery query = new NativeSearchQueryBuilder()
 				.withQuery(
 						boolQuery()
@@ -436,8 +461,9 @@ public class ConceptUpdateHelper extends ComponentService {
 				).withPageable(LARGE_PAGE).build();
 
 		List<ReferenceSetMember> membersToDelete = new ArrayList<>();
-		try (CloseableIterator<ReferenceSetMember> stream = elasticsearchTemplate.stream(query, ReferenceSetMember.class)) {
-			stream.forEachRemaining(member -> {
+		try (SearchHitsIterator<ReferenceSetMember> stream = elasticsearchTemplate.searchForStream(query, ReferenceSetMember.class)) {
+			stream.forEachRemaining(hit -> {
+				ReferenceSetMember member = hit.getContent();
 				member.markDeleted();
 				membersToDelete.add(member);
 			});

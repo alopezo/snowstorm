@@ -8,89 +8,49 @@ Snowstorms's FHIR capabilities are managed using the HAPI Server package, which 
 
 Unfortunately HAPI does not easily support a Swagger interface for testing, but if you are used to working with **[Postman](https://www.getpostman.com/downloads/)**, here is a Postman project to try out some of the FHIR API calls.
 
-[![Run in Postman](https://run.pstmn.io/button.svg)](https://app.getpostman.com/run-collection/4aa97fbcc6a6ccd0e94c)
+[![Run in Postman](https://run.pstmn.io/button.svg)](https://app.getpostman.com/run-collection/5d66502069270fc020ca)
 
-You can also find a description of the capabilities here - https://documenter.getpostman.com/view/462462/S1TVXJ3k
+You can find a description of the capabilities here - https://documenter.getpostman.com/view/462462/S1TVXJ3k
+
+You can also find the HTTP requests in [the fhir-requests.http file](fhir-requests.http) in this repo.
 
 ## Testing
 
 In a default installation, the FHIR endpoints can be found at: http://localhost:8080/fhir  although there is no operation there, so you could try one of these calls:
 
 ### Server Capabilities
-http://localhost:8080/fhir/metadata?_format=json
+http://localhost:8080/fhir/metadata
 
-### Code System Lookups
+### Terminology Capabilities
+http://localhost:8080/fhir/metadata?mode=terminology
 
-#### Code System Lookup of Clinical Finding
-http://localhost:8080/fhir/CodeSystem/$lookup?system=http://snomed.info/sct&code=404684003&_format=json
+### Code System
 
-#### Code System Lookup of 427623005 |Obstetric umbilical artery Doppler (procedure)|
-http://localhost:8080/fhir/CodeSystem/$lookup?system=http://snomed.info/sct&code=427623005&_format=json
+#### [CodeSystem Instances](fhir-resources/code-system-instances.md)
 
-#### Code System Lookup of medicinal product including normalForm and sufficientlyDefined properties.  Properties are listed here: [https://www.hl7.org/fhir/snomedct.html#props]
-http://localhost:8080/fhir/CodeSystem/$lookup?system=http://snomed.info/sct&code=322236009&property=normalForm&property=sufficientlyDefined&_format=json
+#### [CodeSystem Lookup](fhir-resources/code-system-lookup.md)
 
-#### Code System Lookup of 427623005 |Obstetric umbilical artery Doppler (procedure)| in Swedish Extension
-####  Curl example allows use of language headers to specify Swedish language. NB Ensure use of single quotes in URL to avoid $lookup being treated as a variable by Unix shell
-curl -i -H 'Accept-Language: sv' 'http://localhost:8080/fhir/CodeSystem/$lookup?system=http://snomed.info/sct&version=http://snomed.info/sct/45991000052106&code=427623005&_format=json'
+#### [CodeSystem Validate Code](fhir-resources/code-system-validate-code.md)
 
-## ValueSet create, update and delete
+#### [CodeSystem Subsumes](fhir-resources/code-system-subsumes.md)
 
-#### Upload or update a valueset json file:
-curl -i --request PUT "http://localhost:8080/fhir/ValueSet/address-use" \
---header "Content-Type: application/fhir+json" \
--d @exampleVs.json
+### ValueSet
 
-#### Expand a valueset which has an ECL expression in its url element
-http://localhost:8080/fhir/ValueSet/chronic-disease/$expand?includeDesignations=true&_format=json
+#### [ValueSet search, create, replace, update and delete](fhir-resources/valueset-scrud.md)
 
-#### Recover a valueset eg address-use
-http://localhost:8080/fhir/ValueSet/address-use?_format=json
+#### [ValueSet Expansion](fhir-resources/valueset-expansion.md)
 
-#### Delete a valueset
-curl --request DELETE "http://localhost:8080/fhir/ValueSet/address-use" 
+#### [ValueSet Validate Code](fhir-resources/valueset-validate-code.md)
 
+### Concept Maps
 
-## ValueSet Expansion
-### Implicit ValueSets (ie intensionally defined). 
-See  [https://www.hl7.org/fhir/snomedct.html#implicit]
+#### [ValueSet ConceptMap](fhir-resources/concept-map.md)
 
-#### Expansion of an intensionally defined value set using ECL
-http://localhost:8080/fhir/ValueSet/$expand?url=http://snomed.info/sct?fhir_vs=ecl/<<27624003&_format=json
+------
 
-#### Expansion of an intensionally defined value set using ISA
-http://localhost:8080/fhir/ValueSet/$expand?url=http://snomed.info/sct?fhir_vs=isa/27624003&_format=json
+#### Notes on output
+The API will return either JSON or XML depending on what's specified in the 'Accept' header.  Because most browsers specify both HTML and XML as acceptable, where HTML is detected, the server will assume a browser is being used and return JSON unless a format parameter is used.   It is no longer necessary to include &_format=json in URLs when testing via a browser.   When no 'Accept' header is specified, JSON will again be used by default.
 
-#### Expansion of an intensionally defined value set using refset (ICD-10 complex map)
-http://localhost:8080/fhir/ValueSet/$expand?url=http://snomed.info/sct?fhir_vs=refset/447562003&_format=json
-
-#### Expansion of an intensionally defined value set using nothing!  Returns all concepts.
-http://localhost:8080/fhir/ValueSet/$expand?url=http://snomed.info/sct?fhir_vs&_format=json
-
-#### Expansion of an intensional value set against the Swedish Edition, including synonyms
-http://localhost:8080/fhir/ValueSet/$expand?url=http://snomed.info/sct/45991000052106?fhir_vs=ecl/%3C%3C27624003&includeDesignations=true&count=10&designation=sv&designation=en&_format=json
-
-#### Expansion of an intensional value set against the Swedish Edition, specifying Swedish Language for the display field (normally the server returns the FSN, which is in English in the Swedish Edition).
-http://localhost:8080/fhir/ValueSet/$expand?url=http://snomed.info/sct/45991000052106?fhir_vs=ecl/%3C%3C27624003&count=10&displayLanguage=sv&_format=json
-
-#### Paging through 10 at a time, request the 2nd page
-http://localhost:8080/fhir/ValueSet/$expand?url=http://snomed.info/sct?fhir_vs=ecl/<<27624003&count=10&offset=1&_format=json
-
-#### Term filtering - ValueSet of all <<763158003 |Medicinal product (product)| containing the word aspirin.  This is not case sensitive.
-http://localhost:8080/fhir/ValueSet/$expand?url=http://snomed.info/sct?fhir_vs=ecl/<<763158003&filter=Aspirin&_format=json
-
-#### Refset - list all SNOMED concepts mapped to ICD-O  (ECL here is ^446608001 |ICD-O simple map reference set (foundation metadata concept)|)
-http://localhost:8080/fhir/ValueSet/$expand?url=http://snomed.info/sct?fhir_vs=ecl/%5E446608001&count=20&_format=json
-
-## Concept Maps
-#### Historical Association find the "SAME AS" target for inactivated concept 
-localhost:8080/fhir/ConceptMap/$translate?code=134811001&system=http://snomed.info/sct&source=http://snomed.info/sct?fhir_vs&target=http://snomed.info/sct?fhir_vs&url=http://snomed.info/sct?fhir_cm=900000000000527005&_format=json
-
-#### Find ICD-10 Map target for 254153009 |Familial expansile osteolysis (disorder)|
-http://localhost:8080/fhir/ConceptMap/$translate?code=254153009&system=http://snomed.info/sct&source=http://snomed.info/sct?fhir_vs&target=http://hl7.org/fhir/sid/icd-10&url=http://snomed.info/sct?fhir_cm=447562003&_format=json
-
-#### Find SNOMED CT concepts that have a particular ICD-10 code as their map target.  This reverse lookup is not medically safe, as the SI ICD-10 map is unidirectional by design.
-http://localhost:8080/fhir/ConceptMap/$translate?code=Q79.8&system=http://hl7.org/fhir/sid/icd-10&source=http://hl7.org/fhir/sid/icd-10&target=http://snomed.info/sct&_format=json
-
-#### Find all Maps target for 254153009 |Familial expansile osteolysis (disorder)| - note fhir_cm value is left blank so all refsets are potentially returned.
-http://localhost:8080/fhir/ConceptMap/$translate?code=254153009&system=http://snomed.info/sct&source=http://snomed.info/sct?fhir_vs&target=http://snomed.info/sct?fhir_vs&url=http://snomed.info/sct?fhir_cm=&_format=json
+#### Notes on unversioned content
+The FHIR specification has no notion of working with unversioned, unpublished content as a content provider might wish to do during an authoring cycle.   As a 'straw man' solution for discussion, a magic string value of UNVERSIONED is being allowed, which will cause the request to look at the "daily build" branch, or whatever we think of as "MAIN" for that particular code system.   This will work for both CodeSystem $lookup and ValueSet $expand operations eg
+http://localhost:8080/fhir/ValueSet/$expand?url=http://snomed.info/sct/45991000052106/version/UNVERSIONED?fhir_vs=isa/27624003&designation=sv

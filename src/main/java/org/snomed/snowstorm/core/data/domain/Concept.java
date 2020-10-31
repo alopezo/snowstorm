@@ -4,6 +4,7 @@ import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonPropertyOrder;
 import com.fasterxml.jackson.annotation.JsonView;
 import com.google.common.collect.Sets;
+import org.snomed.snowstorm.core.pojo.LanguageDialect;
 import org.snomed.snowstorm.core.pojo.TermLangPojo;
 import org.snomed.snowstorm.core.util.DescriptionHelper;
 import org.snomed.snowstorm.rest.View;
@@ -18,10 +19,10 @@ import javax.validation.constraints.Size;
 import java.util.*;
 import java.util.stream.Collectors;
 
-import static org.snomed.snowstorm.core.util.DescriptionHelper.EN_LANGUAGE_CODE;
+import static org.snomed.snowstorm.config.Config.DEFAULT_LANGUAGE_DIALECTS;
 
 @Document(indexName = "concept")
-@JsonPropertyOrder({"conceptId", "fsn", "pt", "active", "effectiveTime", "released", "releasedEffectiveTime",  "inactivationIndicator", "associationTargets",
+@JsonPropertyOrder({"conceptId", "descendantCount", "fsn", "pt", "active", "effectiveTime", "released", "releasedEffectiveTime",  "inactivationIndicator", "associationTargets",
 		"moduleId", "definitionStatus", "definitionStatusId", "descriptions", "classAxioms", "gciAxioms", "relationships"})
 public class Concept extends SnomedComponent<Concept> implements ConceptView, SnomedComponentWithInactivationIndicator, SnomedComponentWithAssociations {
 
@@ -32,39 +33,45 @@ public class Concept extends SnomedComponent<Concept> implements ConceptView, Sn
 	}
 
 	@JsonView(value = View.Component.class)
-	@Field(type = FieldType.keyword, store = true)
+	@Field(type = FieldType.Keyword, store = true)
 	@Size(min = 5, max = 18)
 	private String conceptId;
 
+	@Transient
 	@JsonIgnore
 	private Set<ReferenceSetMember> inactivationIndicatorMembers;
 
 	@JsonIgnore
 	// Populated when requesting an update
+	@Transient
 	private String inactivationIndicatorName;
 
 	@JsonIgnore
+	@Transient
 	private Set<ReferenceSetMember> associationTargetMembers;
 
 	@JsonIgnore
 	// Populated when requesting an update
+	@Transient
 	private Map<String, Set<String>> associationTargetStrings;
 
 	@JsonView(value = View.Component.class)
-	@Field(type = FieldType.keyword)
+	@Field(type = FieldType.Keyword)
 	@NotNull
 	@Size(min = 5, max = 18)
 	private String moduleId;
 
-	@Field(type = FieldType.keyword)
+	@Field(type = FieldType.Keyword)
 	@NotNull
 	@Size(min = 5, max = 18)
 	private String definitionStatusId;
 
 	@Valid
+	@Transient
 	private Set<Description> descriptions;
 
 	@Valid
+	@Transient
 	private Set<Relationship> relationships;
 
 	@Transient
@@ -75,7 +82,10 @@ public class Concept extends SnomedComponent<Concept> implements ConceptView, Sn
 
 	@Transient
 	@JsonIgnore
-	private List<String> requestedLanguages;
+	private List<LanguageDialect> requestedLanguageDialects;
+
+	@Transient
+	private Long descendantCount;
 
 	public Concept() {
 		active = true;
@@ -133,13 +143,17 @@ public class Concept extends SnomedComponent<Concept> implements ConceptView, Sn
 	@JsonView(value = View.Component.class)
 	@Override
 	public TermLangPojo getFsn() {
-		return DescriptionHelper.getFsnDescriptionTermAndLang(descriptions, requestedLanguages != null ? requestedLanguages : EN_LANGUAGE_CODE);
+		return DescriptionHelper.getFsnDescriptionTermAndLang(descriptions, requestedLanguageDialects != null ? requestedLanguageDialects : DEFAULT_LANGUAGE_DIALECTS);
+	}
+	
+	public TermLangPojo getFsn(List<LanguageDialect> requestedLanguageDialects) {
+		return DescriptionHelper.getFsnDescriptionTermAndLang(descriptions, requestedLanguageDialects != null ? requestedLanguageDialects : DEFAULT_LANGUAGE_DIALECTS);
 	}
 
 	@JsonView(value = View.Component.class)
 	@Override
 	public TermLangPojo getPt() {
-		return DescriptionHelper.getPtDescriptionTermAndLang(descriptions, requestedLanguages != null ? requestedLanguages : EN_LANGUAGE_CODE);
+		return DescriptionHelper.getPtDescriptionTermAndLang(descriptions, requestedLanguageDialects != null ? requestedLanguageDialects : DEFAULT_LANGUAGE_DIALECTS);
 	}
 
 	@JsonView(value = View.Component.class)
@@ -203,7 +217,7 @@ public class Concept extends SnomedComponent<Concept> implements ConceptView, Sn
 	}
 
 	public Concept addFSN(String term) {
-		addDescription(new Description(term).setTypeId(Concepts.FSN));
+		addDescription(new Description(term).setTypeId(Concepts.FSN).addLanguageRefsetMember(Concepts.US_EN_LANG_REFSET, Concepts.PREFERRED));
 		return this;
 	}
 
@@ -261,21 +275,8 @@ public class Concept extends SnomedComponent<Concept> implements ConceptView, Sn
 		return null;
 	}
 
-	/**
-	 * TODO pass acceptability as an ordered list (by preference)
-	 * @param activeFlag 1 or 0 or pass null to obtain either
-	 * @param type - the SCTID for fsn, synonym or textDefn, or pass null to obtain either
-	 * @param acceptability - the SCTID for acceptable or preferred, or pass null to ignore acceptability
-	 * @param refsetId - the SCTID of the language refset for which the acceptability must apply.  Ignored if the acceptability is null.
-	 * @return a collection of descriptions that match the specified criteria
-	 */
-	public List<Description> getDescriptions(Boolean activeFlag, String type, String acceptability, String refsetId) {
-		List<Description> matchingDescriptions = descriptions.stream()
-							.filter(desc -> (activeFlag == null || activeFlag.equals(desc.isActive())))
-							.filter(desc -> (type == null || desc.getType().equals(type)))
-							.filter(desc -> (acceptability == null || desc.hasAcceptability(acceptability, refsetId)))
-							.collect(Collectors.toList());
-		return matchingDescriptions;
+	public List<Description> getActiveDescriptions() {
+		return descriptions.stream().filter(SnomedComponent::isActive).collect(Collectors.toList());
 	}
 
 	public Relationship getRelationship(String relationshipId) {
@@ -329,13 +330,12 @@ public class Concept extends SnomedComponent<Concept> implements ConceptView, Sn
 	}
 
 	public List<Relationship> getRelationships(Boolean activeFlag, String typeId, String destinationId, String charTypeId) {
-		List<Relationship> matchingDescriptions = relationships.stream()
+		return relationships.stream()
 							.filter(rel -> (activeFlag == null || activeFlag.equals(rel.isActive())))
 							.filter(rel -> (typeId == null || rel.getTypeId().equals(typeId)))
 							.filter(rel -> (destinationId == null || rel.getDestinationId().equals(destinationId)))
 							.filter(rel -> (charTypeId == null || rel.getCharacteristicTypeId().equals(charTypeId)))
 							.collect(Collectors.toList());
-		return matchingDescriptions;
 	}
 
 	@Override
@@ -396,8 +396,17 @@ public class Concept extends SnomedComponent<Concept> implements ConceptView, Sn
 		this.generalConceptInclusionAxioms = generalConceptInclusionAxioms;
 	}
 
-	public void setRequestedLanguages(List<String> requestedLanguages) {
-		this.requestedLanguages = requestedLanguages;
+	@JsonView(value = View.Component.class)
+	public Long getDescendantCount() {
+		return descendantCount;
+	}
+
+	public void setDescendantCount(Long descendantCount) {
+		this.descendantCount = descendantCount;
+	}
+
+	public void setRequestedLanguageDialects(List<LanguageDialect> requestedLanguageDialects) {
+		this.requestedLanguageDialects = requestedLanguageDialects;
 	}
 
 	@Override

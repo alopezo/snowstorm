@@ -6,9 +6,9 @@ public class CodeSystemUpdateRequest {
 
 	public String name;
 	public String countryCode;
+	public String maintainerType;
 	public String defaultLanguageCode;
 	public String[] defaultLanguageReferenceSets;
-	public String branchPath;
 
 	@ApiModelProperty(value = "false")
 	public boolean dailyBuildAvailable;
@@ -16,9 +16,8 @@ public class CodeSystemUpdateRequest {
 	public CodeSystemUpdateRequest() {
 	}
 
-	public CodeSystemUpdateRequest setBranchPath(String branchPath) {
-		this.branchPath = branchPath;
-		return this;
+	public CodeSystemUpdateRequest(String name) {
+		this.name = name;
 	}
 
 	public String getName() {
@@ -29,16 +28,16 @@ public class CodeSystemUpdateRequest {
 		return countryCode;
 	}
 
+	public String getMaintainerType() {
+		return maintainerType;
+	}
+
 	public String getDefaultLanguageCode() {
 		return defaultLanguageCode;
 	}
 
 	public String[] getDefaultLanguageReferenceSets() {
 		return defaultLanguageReferenceSets;
-	}
-
-	public String getBranchPath() {
-		return branchPath;
 	}
 
 	public boolean isDailyBuildAvailable() {

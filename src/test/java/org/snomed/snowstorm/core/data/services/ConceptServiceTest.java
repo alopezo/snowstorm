@@ -7,34 +7,33 @@ import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
 import io.kaicode.elasticvc.api.BranchService;
 import io.kaicode.elasticvc.api.ComponentService;
+import org.elasticsearch.common.collect.MapBuilder;
 import org.junit.Assert;
-import org.junit.Before;
-import org.junit.Test;
-import org.junit.runner.RunWith;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.snomed.snowstorm.AbstractTest;
-import org.snomed.snowstorm.TestConfig;
 import org.snomed.snowstorm.core.data.domain.*;
+import org.snomed.snowstorm.core.data.services.pojo.DescriptionCriteria;
 import org.snomed.snowstorm.core.data.services.pojo.MemberSearchRequest;
+import org.snomed.snowstorm.core.data.services.pojo.PersistedComponents;
 import org.snomed.snowstorm.core.pojo.BranchTimepoint;
+import org.snomed.snowstorm.core.pojo.LanguageDialect;
 import org.snomed.snowstorm.rest.View;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
-import org.springframework.test.context.ContextConfiguration;
-import org.springframework.test.context.junit4.SpringJUnit4ClassRunner;
 
 import java.io.IOException;
 import java.util.*;
 import java.util.stream.Collectors;
 
 import static org.junit.Assert.*;
+import static org.snomed.snowstorm.config.Config.DEFAULT_LANGUAGE_DIALECTS;
 import static org.snomed.snowstorm.core.data.domain.Concepts.*;
 
-@RunWith(SpringJUnit4ClassRunner.class)
-@ContextConfiguration(classes = TestConfig.class)
-public class ConceptServiceTest extends AbstractTest {
+class ConceptServiceTest extends AbstractTest {
 
 	@Autowired
 	private BranchService branchService;
@@ -68,8 +67,8 @@ public class ConceptServiceTest extends AbstractTest {
 	private final Logger logger = LoggerFactory.getLogger(getClass());
 	private ObjectMapper objectMapper;
 
-	@Before
-	public void setup() {
+	@BeforeEach
+	void setup() {
 		testUtil = new ServiceTestUtil(conceptService);
 		objectMapper = new ObjectMapper();
 		DeserializationConfig deserializationConfig = objectMapper.getDeserializationConfig().without(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES);
@@ -78,7 +77,7 @@ public class ConceptServiceTest extends AbstractTest {
 	}
 
 	@Test
-	public void testConceptCreationBranchingVisibility() throws ServiceException {
+	void testConceptCreationBranchingVisibility() throws ServiceException {
 		Assert.assertNull("Concept 100001 does not exist on MAIN.", conceptService.find("100001", "MAIN"));
 
 		conceptService.create(new Concept("100001", "10000111"), "MAIN");
@@ -100,7 +99,7 @@ public class ConceptServiceTest extends AbstractTest {
 	}
 
 	@Test
-	public void testDeleteDescription() throws ServiceException {
+	void testDeleteDescription() throws ServiceException {
 		final Concept concept = conceptService.create(
 				new Concept("100001")
 						.addDescription(new Description("100001", "one"))
@@ -126,7 +125,7 @@ public class ConceptServiceTest extends AbstractTest {
 	}
 
 	@Test
-	public void testDeleteLangMembersDuringDescriptionDeletion() throws ServiceException {
+	void testDeleteLangMembersDuringDescriptionDeletion() throws ServiceException {
 		Concept concept = new Concept("10000123");
 		Description fsn = fsn("Is a (attribute)");
 		conceptService.create(concept
@@ -153,7 +152,7 @@ public class ConceptServiceTest extends AbstractTest {
 	}
 
 	@Test
-	public void testDescriptionInactivation() throws ServiceException {
+	void testDescriptionInactivation() throws ServiceException {
 		Concept concept = new Concept("10000123");
 		Description fsn = fsn("Is a (attribute)");
 		conceptService.create(concept
@@ -214,7 +213,7 @@ public class ConceptServiceTest extends AbstractTest {
 	}
 
 	@Test
-	public void testCreateDeleteConcept() throws ServiceException {
+	void testCreateDeleteConcept() throws ServiceException {
 		String path = "MAIN";
 		conceptService.create(new Concept(ISA).setDefinitionStatusId(PRIMITIVE).addDescription(fsn("Is a (attribute)")), path);
 		conceptService.create(new Concept(SNOMEDCT_ROOT).setDefinitionStatusId(PRIMITIVE).addDescription(fsn("SNOMED CT Concept")), path);
@@ -230,7 +229,7 @@ public class ConceptServiceTest extends AbstractTest {
 	}
 
 	@Test
-	public void testCreateDeleteRelationship() throws ServiceException {
+	void testCreateDeleteRelationship() throws ServiceException {
 		conceptService.create(new Concept(ISA).setDefinitionStatusId(PRIMITIVE).addDescription(fsn("Is a (attribute)")), "MAIN");
 		conceptService.create(new Concept(SNOMEDCT_ROOT).setDefinitionStatusId(PRIMITIVE).addDescription(fsn("SNOMED CT Concept")), "MAIN");
 
@@ -273,7 +272,7 @@ public class ConceptServiceTest extends AbstractTest {
 	}
 
 	@Test
-	public void testMultipleConceptVersionsOnOneBranch() throws ServiceException {
+	void testMultipleConceptVersionsOnOneBranch() throws ServiceException {
 		assertEquals(0, conceptService.findAll("MAIN", ServiceTestUtil.PAGE_REQUEST).getTotalElements());
 		conceptService.create(new Concept("100001", "10000111"), "MAIN");
 
@@ -289,7 +288,7 @@ public class ConceptServiceTest extends AbstractTest {
 	}
 
 	@Test
-	public void testUpdateExistingConceptOnNewBranch() throws ServiceException {
+	void testUpdateExistingConceptOnNewBranch() throws ServiceException {
 		conceptService.create(new Concept("100001", "10000111"), "MAIN");
 
 		branchService.create("MAIN/A");
@@ -301,7 +300,7 @@ public class ConceptServiceTest extends AbstractTest {
 	}
 
 	@Test
-	public void testOnlyUpdateWhatChanged() throws ServiceException {
+	void testOnlyUpdateWhatChanged() throws ServiceException {
 		final Integer effectiveTime = 20160731;
 
 		conceptService.create(new Concept("100001", effectiveTime, true, Concepts.CORE_MODULE, Concepts.PRIMITIVE)
@@ -313,22 +312,22 @@ public class ConceptServiceTest extends AbstractTest {
 
 		final Concept conceptAfterSave = conceptService.find("100001", "MAIN");
 
-		conceptAfterSave.getDescription("1000011").setActive(false);
+		Description fsn = conceptAfterSave.getDescription("1000011");
+		fsn.setActive(false);
+		String fsnInternalId = fsn.getInternalId();
 		conceptService.update(conceptAfterSave, "MAIN");
-
 		final Concept conceptAfterUpdate = conceptService.find("100001", "MAIN");
 
 		assertEquals("Concept document should not have been updated.",
 				conceptAfterSave.getInternalId(), conceptAfterUpdate.getInternalId());
 		assertEquals("Synonym document should not have been updated.",
 				conceptAfterSave.getDescription("1000012").getInternalId(), conceptAfterUpdate.getDescription("1000012").getInternalId());
-		Assert.assertNotEquals("FSN document should have been updated.",
-				conceptAfterSave.getDescription("1000011").getInternalId(), conceptAfterUpdate.getDescription("1000011").getInternalId());
+		Assert.assertNotEquals("FSN document should have been updated.", fsnInternalId, conceptAfterUpdate.getDescription("1000011").getInternalId());
 
 	}
 
 	@Test
-	public void testFindConceptOnParentBranchUsingBaseVersion() throws ServiceException {
+	void testFindConceptOnParentBranchUsingBaseVersion() throws ServiceException {
 		conceptService.create(new Concept("100001", "10000111"), "MAIN");
 		conceptService.update(new Concept("100001", "10000222"), "MAIN");
 
@@ -349,7 +348,7 @@ public class ConceptServiceTest extends AbstractTest {
 	}
 
 	@Test
-	public void testListConceptsOnGrandchildBranchWithUpdateOnChildBranch() throws ServiceException {
+	void testListConceptsOnGrandchildBranchWithUpdateOnChildBranch() throws ServiceException {
 		conceptService.create(new Concept("100001", "10000111"), "MAIN");
 		assertEquals("10000111", conceptService.find("100001", "MAIN").getModuleId());
 
@@ -384,21 +383,34 @@ public class ConceptServiceTest extends AbstractTest {
 	}
 
 	@Test
-	public void testSaveConceptWithDescription() throws ServiceException {
+	void testSaveConceptWithDescription() throws ServiceException {
 		final Concept concept = new Concept("50960005", 20020131, true, "900000000000207008", "900000000000074008");
-		concept.addDescription(new Description("84923010", 20020131, true, "900000000000207008", "50960005", "en", "900000000000013009", "Bleeding", "900000000000020002"));
-		conceptService.create(concept, "MAIN");
+		concept.addDescription(new Description("84923010", 20020131, true, "900000000000207008", "50960005", "en", FSN,
+				"Bleeding (morphologic abnormality)", "900000000000020002").addLanguageRefsetMember(US_EN_LANG_REFSET, PREFERRED));
+		Concept savedConcept = conceptService.create(concept, DEFAULT_LANGUAGE_DIALECTS, "MAIN");
+		assertEquals("Bleeding (morphologic abnormality)", savedConcept.getFsn().getTerm());
 
-		final Concept savedConcept = conceptService.find("50960005", "MAIN");
+		savedConcept = conceptService.find("50960005", "MAIN");
 		Assert.assertNotNull(savedConcept);
+		assertEquals("Bleeding (morphologic abnormality)", savedConcept.getFsn().getTerm());
 		assertEquals(1, savedConcept.getDescriptions().size());
-		final Description description = savedConcept.getDescriptions().iterator().next();
+		Description description = savedConcept.getDescriptions().iterator().next();
 		assertEquals("84923010", description.getDescriptionId());
-		assertEquals(0, description.getAcceptabilityMapFromLangRefsetMembers().size());
+		assertEquals(1, description.getAcceptabilityMapFromLangRefsetMembers().size());
+
+		description.clearLanguageRefsetMembers();
+		description.setAcceptabilityMap(MapBuilder.newMapBuilder(new HashMap<String, String>()).put(US_EN_LANG_REFSET, PREFERRED_CONSTANT).map());
+
+		Concept updatedConcept = conceptService.update(savedConcept, DEFAULT_LANGUAGE_DIALECTS, "MAIN");
+		assertEquals("Bleeding (morphologic abnormality)", updatedConcept.getFsn().getTerm());
+		assertEquals(1, updatedConcept.getDescriptions().size());
+		description = updatedConcept.getDescriptions().iterator().next();
+		assertEquals("84923010", description.getDescriptionId());
+		assertEquals(1, description.getAcceptabilityMapFromLangRefsetMembers().size());
 	}
 
 	@Test
-	public void testSaveConceptWithAxioms() throws ServiceException {
+	void testSaveConceptWithAxioms() throws ServiceException {
 		String path = "MAIN";
 		final Concept concept = new Concept("50960005", 20020131, true, Concepts.CORE_MODULE, "900000000000074008");
 		concept.addAxiom(new Axiom(null, Concepts.FULLY_DEFINED, Sets.newHashSet(new Relationship(Concepts.ISA, "10000100"), new Relationship("10000200", "10000300"))).setModuleId(CORE_MODULE));
@@ -463,7 +475,7 @@ public class ConceptServiceTest extends AbstractTest {
 	}
 
 	@Test
-	public void testGciWithOneRelationshipError() throws ServiceException {
+	void testGciWithOneRelationshipError() throws ServiceException {
 		try {
 			conceptService.create(new Concept()
 							.addAxiom(new Relationship(ISA, CLINICAL_FINDING))
@@ -495,11 +507,14 @@ public class ConceptServiceTest extends AbstractTest {
 	}
 
 	@Test
-	public void testConceptInactivation() throws ServiceException {
+	void testConceptInactivation() throws ServiceException {
 		String path = "MAIN";
 		conceptService.batchCreate(Lists.newArrayList(new Concept("107658001"), new Concept("116680003")), path);
 		final Concept concept = new Concept("50960005", 20020131, true, "900000000000207008", "900000000000074008");
 		concept.addDescription(new Description("84923010", 20020131, true, "900000000000207008", "50960005", "en", "900000000000013009", "Bleeding", "900000000000020002"));
+		Description inactiveDescriptionCreate = new Description("Another");
+		inactiveDescriptionCreate.setActive(false);
+		concept.addDescription(inactiveDescriptionCreate);
 		concept.addRelationship(new Relationship(ISA, "107658001"));
 		Concept savedConcept = conceptService.create(concept, path);
 
@@ -548,9 +563,15 @@ public class ConceptServiceTest extends AbstractTest {
 		assertEquals(concept.getId(), associationTargetMember.getReferencedComponentId());
 		assertEquals("87100004", associationTargetMember.getAdditionalField("targetComponentId"));
 
-		Description description = inactiveConcept.getDescriptions().iterator().next();
-		assertTrue("Description is still active", description.isActive());
-		assertEquals("Description automatically has inactivation indicator", "CONCEPT_NON_CURRENT", description.getInactivationIndicator());
+		Set<Description> descriptions = inactiveConcept.getDescriptions();
+		Optional<Description> activeDescription = descriptions.stream().filter(Description::isActive).findFirst();
+		assertTrue("One description is still active", activeDescription.isPresent());
+		assertEquals("Active description automatically has inactivation indicator", "CONCEPT_NON_CURRENT", activeDescription.get().getInactivationIndicator());
+
+		// Assert that inactive descriptions also have concept non current indicator applied automatically too.
+		Optional<Description> inactiveDescription = descriptions.stream().filter(d -> !d.isActive()).findFirst();
+		assertTrue("One description is still inactive", inactiveDescription.isPresent());
+		assertEquals("Inactive description automatically has inactivation indicator", "CONCEPT_NON_CURRENT", inactiveDescription.get().getInactivationIndicator());
 
 		assertFalse("Relationship is inactive.", inactiveConcept.getRelationships().iterator().next().isActive());
 
@@ -567,7 +588,7 @@ public class ConceptServiceTest extends AbstractTest {
 	}
 
 	@Test
-	public void testCreateObjectAttribute() throws ServiceException {
+	void testCreateObjectAttribute() throws ServiceException {
 		conceptService.create(new Concept(CONCEPT_MODEL_OBJECT_ATTRIBUTE)
 						.addFSN("Concept model object attribute (attribute)")
 						.addAxiom(new Axiom().setRelationships(Collections.singleton(new Relationship(ISA, CONCEPT_MODEL_ATTRIBUTE))))
@@ -583,7 +604,7 @@ public class ConceptServiceTest extends AbstractTest {
 	}
 
 	@Test
-	public void testSaveConceptWithDescriptionAndAcceptabilityTogether() throws ServiceException {
+	void testSaveConceptWithDescriptionAndAcceptabilityTogether() throws ServiceException {
 		final Concept concept = new Concept("50960005", 20020131, true, "900000000000207008", "900000000000074008");
 		concept.addDescription(
 				new Description("84923010", 20020131, true, "900000000000207008", "50960005", "en", "900000000000013009", "Bleeding", "900000000000020002")
@@ -602,7 +623,7 @@ public class ConceptServiceTest extends AbstractTest {
 	}
 
 	@Test
-	public void testChangeDescriptionAcceptabilityOnChildBranch() throws ServiceException {
+	void testChangeDescriptionAcceptabilityOnChildBranch() throws ServiceException {
 		final Concept concept = new Concept("50960005", 20020131, true, "900000000000207008", "900000000000074008");
 		concept.addDescription(
 				new Description("84923010", 20020131, true, "900000000000207008", "50960005", "en", "900000000000013009", "Bleeding", "900000000000020002")
@@ -636,7 +657,7 @@ public class ConceptServiceTest extends AbstractTest {
 	}
 
 	@Test
-	public void testChangeDescriptionCaseSignificance() throws ServiceException, IOException {
+	void testChangeDescriptionCaseSignificance() throws ServiceException, IOException {
 		String conceptId = "50960005";
 		Concept concept = new Concept(conceptId, 20020131, true, "900000000000207008", "900000000000074008");
 		String descriptionId = "84923010";
@@ -689,7 +710,7 @@ public class ConceptServiceTest extends AbstractTest {
 	}
 
 	@Test
-	public void testInactivateDescriptionAcceptability() throws ServiceException {
+	void testInactivateDescriptionAcceptability() throws ServiceException {
 		final Concept concept = new Concept("50960005", 20020131, true, "900000000000207008", "900000000000074008");
 		// Add acceptability with released refset member
 		concept.addDescription(
@@ -728,7 +749,7 @@ public class ConceptServiceTest extends AbstractTest {
 	}
 
 	@Test
-	public void testInactivateDescriptionAcceptabilityViaDescriptionInactivation() throws ServiceException {
+	void testInactivateDescriptionAcceptabilityViaDescriptionInactivation() throws ServiceException {
 		final Concept concept = new Concept("50960005", 20020131, true, "900000000000207008", "900000000000074008");
 		// Add acceptability with released refset member
 		concept.addDescription(
@@ -767,7 +788,7 @@ public class ConceptServiceTest extends AbstractTest {
 	}
 
 	@Test
-	public void testLatestVersionMatch() throws ServiceException {
+	void testLatestVersionMatch() throws ServiceException {
 		testUtil.createConceptWithPathIdAndTerm("MAIN", "100001", "Heart");
 
 		assertEquals(1, descriptionService.findDescriptionsWithAggregations("MAIN", "Heart", ServiceTestUtil.PAGE_REQUEST).getNumberOfElements());
@@ -795,7 +816,7 @@ public class ConceptServiceTest extends AbstractTest {
 	}
 
 	@Test
-	public void testRestoreEffectiveTime() throws ServiceException {
+	void testRestoreEffectiveTime() throws ServiceException {
 		final Integer effectiveTime = 20170131;
 		final String conceptId = "50960005";
 		final String originalModuleId = "900000000000207008";
@@ -804,7 +825,8 @@ public class ConceptServiceTest extends AbstractTest {
 		// Create concept
 		final Concept concept = new Concept(conceptId, null, true, originalModuleId, "900000000000074008")
 				.addDescription(new Description("10000013", null, true, originalModuleId, conceptId, "en",
-						Concepts.FSN, "Pizza", Concepts.CASE_INSENSITIVE).addLanguageRefsetMember(Concepts.GB_EN_LANG_REFSET, Concepts.PREFERRED));
+						Concepts.FSN, "Pizza", Concepts.CASE_INSENSITIVE).addLanguageRefsetMember(Concepts.GB_EN_LANG_REFSET, Concepts.PREFERRED))
+				.addRelationship(new Relationship(ISA, SNOMEDCT_ROOT).setInferred(true));
 		conceptService.create(concept, path);
 
 		// Run release process
@@ -827,10 +849,12 @@ public class ConceptServiceTest extends AbstractTest {
 		assertEquals(effectiveTime, savedMember.getReleasedEffectiveTime());
 		assertEquals("true|900000000000207008|acceptabilityId|900000000000548007", savedMember.getReleaseHash());
 
-		// Change concept, description and member
+		// Change concept, description, member and relationship
 		savedConcept.setModuleId("10000123");
 		savedDescription.setCaseSignificanceId(Concepts.ENTIRE_TERM_CASE_SENSITIVE);
 		savedMember.setAdditionalField(ReferenceSetMember.LanguageFields.ACCEPTABILITY_ID, Concepts.ACCEPTABLE);
+		Relationship savedRelationship = savedConcept.getRelationships().iterator().next();
+		savedRelationship.setGroupId(1);
 		conceptService.update(savedConcept, "MAIN");
 
 		// effectiveTimes cleared
@@ -841,6 +865,7 @@ public class ConceptServiceTest extends AbstractTest {
 		Description descriptionAfterUpdate = conceptAfterUpdate.getDescriptions().iterator().next();
 		Assert.assertNull(descriptionAfterUpdate.getEffectiveTimeI());
 		Assert.assertNull(descriptionAfterUpdate.getLangRefsetMembers().values().iterator().next().getEffectiveTimeI());
+		Assert.assertNull(conceptAfterUpdate.getRelationships().iterator().next().getEffectiveTimeI());
 
 		// Change concept back
 		conceptAfterUpdate.setModuleId(originalModuleId);
@@ -869,10 +894,20 @@ public class ConceptServiceTest extends AbstractTest {
 		conceptWithRestoredDate = conceptService.find(conceptId, path);
 		ReferenceSetMember memberWithRestoredDate = conceptWithRestoredDate.getDescriptions().iterator().next().getLangRefsetMembers().values().iterator().next();
 		assertEquals(effectiveTime, memberWithRestoredDate.getEffectiveTimeI());
+
+		// Change relationship back
+		assertEquals(1, conceptWithRestoredDate.getRelationships().size());
+		Relationship relationship = conceptWithRestoredDate.getRelationships().iterator().next();
+		assertNull(relationship.getEffectiveTimeI());
+		relationship.setReleasedEffectiveTime(null);// Clear fields to simulate an API call.
+		relationship.setReleaseHash(null);
+		relationship.setGroupId(0);
+		Concept updatedConceptFromResponse = conceptService.update(conceptWithRestoredDate, "MAIN");
+		assertNotNull(updatedConceptFromResponse.getRelationships().iterator().next().getEffectiveTimeI());
 	}
 
 	@Test
-	public void testCreateUpdate10KConcepts() throws ServiceException {
+	void testCreateUpdate10KConcepts() throws ServiceException {
 		branchService.create("MAIN/A");
 		conceptService.create(new Concept(SNOMEDCT_ROOT), "MAIN/A");
 
@@ -893,7 +928,7 @@ public class ConceptServiceTest extends AbstractTest {
 		assertEquals(concepts.size() + 1, page.getTotalElements());
 		assertEquals(Concepts.CORE_MODULE, page.getContent().get(50).getModuleId());
 
-		Page<ConceptMini> conceptDescendants = queryService.findDescendantsAsConceptMinis(SNOMEDCT_ROOT, "MAIN/A", Relationship.CharacteristicType.stated, PageRequest.of(0, 50));
+		Page<ConceptMini> conceptDescendants = queryService.search(queryService.createQueryBuilder(true).ecl("<" + SNOMEDCT_ROOT), "MAIN/A", PageRequest.of(0, 50));
 		assertEquals(10 * 1000, conceptDescendants.getTotalElements());
 
 		List<Relationship> inboundRelationships = relationshipService.findInboundRelationships(SNOMEDCT_ROOT, "MAIN/A", Relationship.CharacteristicType.stated).getContent();
@@ -919,12 +954,12 @@ public class ConceptServiceTest extends AbstractTest {
 	}
 
 	@Test
-	public void testLoadConceptFromParentBranchUsingBaseTimepoint() throws ServiceException {
-		List<String> en = Lists.newArrayList("en");
+	void testLoadConceptFromParentBranchUsingBaseTimepoint() throws ServiceException {
+		List<LanguageDialect> en = DEFAULT_LANGUAGE_DIALECTS;
 		String conceptId = "100001";
 
 		// Concept on MAIN with 1 description
-		Concept concept = testUtil.createConceptWithPathIdAndTerm("MAIN", conceptId, "Heart");
+		testUtil.createConceptWithPathIdAndTerm("MAIN", conceptId, "Heart");
 
 		// Create branch A
 		branchService.create("MAIN/A");
@@ -957,8 +992,104 @@ public class ConceptServiceTest extends AbstractTest {
 				.sorted(Comparator.comparing(Description::getTermLen)).map(Description::getTerm).collect(Collectors.toList()).toString());
 	}
 
-	private void printAllDescriptions(String path) {
-		final Page<Description> descriptions = descriptionService.findDescriptionsWithAggregations(path, null, ServiceTestUtil.PAGE_REQUEST);
+	@Test
+	void testUpdateDescriptionInactivationIndicatorRefsetsWithNoChanges() throws ServiceException {
+		String conceptId = "148176006";
+		String descriptionId = "231971010";
+
+		// Concept on MAIN with 1 inactive description
+		final Concept concept = new Concept(conceptId);
+		Description inactiveDescription = new Description(descriptionId,"Menopause: LH, FSH checked");
+		inactiveDescription.setActive(false);
+
+		ReferenceSetMember conceptNonCurrentIndicatorRefset = new ReferenceSetMember();
+		conceptNonCurrentIndicatorRefset.setMemberId("9138e35b-6fed-5c76-a75e-ea7c3061b41e");
+		conceptNonCurrentIndicatorRefset.setAdditionalField("valueId", "900000000000495008");
+		conceptNonCurrentIndicatorRefset.setActive(false);
+		conceptNonCurrentIndicatorRefset.setReleased(true);
+		conceptNonCurrentIndicatorRefset.setModuleId("900000000000207008");
+		conceptNonCurrentIndicatorRefset.setRefsetId("900000000000490003");
+		conceptNonCurrentIndicatorRefset.setReferencedComponentId("231971010");
+		conceptNonCurrentIndicatorRefset.setReleasedEffectiveTime(20150731);
+		conceptNonCurrentIndicatorRefset.release(20150731);
+
+		ReferenceSetMember erroneousIndicatorRefset = new ReferenceSetMember();
+		erroneousIndicatorRefset.setMemberId("9badf4d9-a88e-4118-9883-89ff6219dfe3");
+		erroneousIndicatorRefset.setAdditionalField("valueId", "900000000000485001");
+		erroneousIndicatorRefset.setActive(true);
+		erroneousIndicatorRefset.setReleased(true);
+		erroneousIndicatorRefset.setModuleId("900000000000207008");
+		erroneousIndicatorRefset.setRefsetId("900000000000490003");
+		erroneousIndicatorRefset.setReferencedComponentId("231971010");
+		erroneousIndicatorRefset.setReleasedEffectiveTime(20150731);
+		erroneousIndicatorRefset.release(20150731);
+
+		conceptService.create(concept.addDescription(inactiveDescription), "MAIN");
+
+		// Add 2 Description inactivation indicator member reference sets with 1 active and 1 inactive
+		referenceSetMemberService.createMember("MAIN", conceptNonCurrentIndicatorRefset);
+		referenceSetMemberService.createMember("MAIN", erroneousIndicatorRefset);
+
+
+		List<ReferenceSetMember> inactivationIndicatorMembers = referenceSetMemberService.findMembers("MAIN", descriptionId, PageRequest.of(0, 10)).getContent();
+		Assert.assertEquals(2, inactivationIndicatorMembers.size());
+		Concept actualConcept = conceptService.find(conceptId, DEFAULT_LANGUAGE_DIALECTS, new BranchTimepoint("MAIN"));
+
+		assertEquals(1, actualConcept.getDescriptions().size());
+		assertEquals(2,actualConcept.getDescriptions().iterator().next().getInactivationIndicatorMembers().size());
+
+		PersistedComponents persistedComponents = conceptService.createUpdate(Arrays.asList(actualConcept), "MAIN");
+		assertEquals(2, persistedComponents.getPersistedDescriptions().iterator().next().getInactivationIndicatorMembers().size());
+	}
+
+	@Test
+	void testTypeAndTargetWhenSavingRelationship() throws Exception {
+		conceptService.create(new Concept(ISA).setDefinitionStatusId(PRIMITIVE).addDescription(fsn("Is a (attribute)")), "MAIN");
+		conceptService.create(new Concept(SNOMEDCT_ROOT).setDefinitionStatusId(PRIMITIVE).addDescription(fsn("SNOMED CT Concept")), "MAIN");
+
+		Concept concept = conceptService.create(
+				new Concept("100001")
+						.addRelationship(new Relationship("100001", ISA, SNOMEDCT_ROOT))
+						.addRelationship(new Relationship("100002", ISA, CLINICAL_FINDING))
+				, "MAIN");
+
+		concept = conceptService.find(concept.getConceptId(), "MAIN");
+		assertNotNull(concept);
+		Relationship relationship = concept.getRelationship("100002");
+		assertNotNull(relationship.getTarget());
+		assertNotNull(relationship.getType());
+		// Use repository directly to make sure transient fields are not stored
+		Relationship storedRelationship = relationshipService.findRelationship("MAIN", "100002");
+		assertNotNull(storedRelationship);
+		assertNull(storedRelationship.getTarget());
+		assertNull(storedRelationship.getType());
+
+		// update concept with relationships fully loaded
+		relationship.setActive(false);
+		relationship.setRelationshipGroup(1);
+		relationship.setGroupOrder(2);
+		relationship.setAttributeOrder(Short.valueOf("1"));
+		relationship.setSource(new ConceptMini("100001", DEFAULT_LANGUAGE_DIALECTS));
+		conceptService.update(concept, "MAIN");
+		// make sure transient fields are not stored after updating
+		storedRelationship = relationshipService.findRelationship("MAIN", "100002");
+		assertNotNull(storedRelationship);
+		assertNull(storedRelationship.getTarget());
+		assertNull(storedRelationship.getType());
+		assertNull(storedRelationship.getSource());
+		assertNull(storedRelationship.getAttributeOrder());
+		// when group order is null and the value returned is the relationship group
+		assertEquals(storedRelationship.getRelationshipGroup(), storedRelationship.getGroupOrder());
+
+		// make sure view is not affected
+		concept = conceptService.find(concept.getConceptId(), "MAIN");
+		relationship = concept.getRelationship("100002");
+		assertNotNull(relationship.getTarget());
+		assertNotNull(relationship.getType());
+	}
+
+	private void printAllDescriptions(String path) throws TooCostlyException {
+		final Page<Description> descriptions = descriptionService.findDescriptionsWithAggregations(path, new DescriptionCriteria(), ServiceTestUtil.PAGE_REQUEST);
 		logger.info("Description on " + path);
 		for (Description description : descriptions) {
 			logger.info("{}", description);
@@ -968,6 +1099,7 @@ public class ConceptServiceTest extends AbstractTest {
 	private Description fsn(String term) {
 		Description description = new Description(term);
 		description.setTypeId(FSN);
+		description.addLanguageRefsetMember(US_EN_LANG_REFSET, PREFERRED);
 		return description;
 	}
 

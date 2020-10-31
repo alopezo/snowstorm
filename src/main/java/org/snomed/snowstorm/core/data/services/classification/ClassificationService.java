@@ -1,12 +1,15 @@
 package org.snomed.snowstorm.core.data.services.classification;
 
 import com.google.common.collect.Lists;
+import io.kaicode.elasticvc.api.BranchCriteria;
 import io.kaicode.elasticvc.api.BranchService;
+import io.kaicode.elasticvc.api.VersionControlHelper;
 import io.kaicode.elasticvc.domain.Branch;
 import io.kaicode.elasticvc.domain.Commit;
 import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 import org.elasticsearch.ElasticsearchException;
 import org.elasticsearch.common.Strings;
+import org.elasticsearch.common.util.concurrent.UncategorizedExecutionException;
 import org.elasticsearch.index.query.BoolQueryBuilder;
 import org.elasticsearch.search.sort.FieldSortBuilder;
 import org.elasticsearch.search.sort.SortBuilders;
@@ -27,6 +30,7 @@ import org.snomed.snowstorm.core.data.repositories.classification.RelationshipCh
 import org.snomed.snowstorm.core.data.services.*;
 import org.snomed.snowstorm.core.data.services.classification.pojo.ClassificationStatusResponse;
 import org.snomed.snowstorm.core.data.services.classification.pojo.EquivalentConceptsResponse;
+import org.snomed.snowstorm.core.pojo.LanguageDialect;
 import org.snomed.snowstorm.core.rf2.RF2Type;
 import org.snomed.snowstorm.core.rf2.export.ExportException;
 import org.snomed.snowstorm.core.rf2.export.ExportService;
@@ -37,14 +41,14 @@ import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.elasticsearch.core.ElasticsearchOperations;
-import org.springframework.data.elasticsearch.core.query.GetQuery;
+import org.springframework.data.elasticsearch.core.SearchHit;
+import org.springframework.data.elasticsearch.core.SearchHits;
+import org.springframework.data.elasticsearch.core.SearchHitsIterator;
 import org.springframework.data.elasticsearch.core.query.NativeSearchQueryBuilder;
-import org.springframework.data.util.CloseableIterator;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.security.core.context.SecurityContext;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
-import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.RestClientException;
 
 import javax.annotation.PostConstruct;
@@ -53,6 +57,8 @@ import java.io.*;
 import java.text.NumberFormat;
 import java.text.SimpleDateFormat;
 import java.util.*;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.stream.Collectors;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
@@ -61,6 +67,7 @@ import static io.kaicode.elasticvc.api.ComponentService.LARGE_PAGE;
 import static java.lang.Long.parseLong;
 import static org.elasticsearch.index.query.QueryBuilders.*;
 import static org.snomed.snowstorm.core.data.domain.classification.ClassificationStatus.*;
+import static org.snomed.snowstorm.core.data.services.ConceptService.DISABLE_CONTENT_AUTOMATIONS_METADATA_KEY;
 
 @Service
 public class ClassificationService {
@@ -98,32 +105,49 @@ public class ClassificationService {
 	@Autowired
 	private ConceptService conceptService;
 
+	@Autowired
+	private VersionControlHelper versionControlHelper;
+
 	private final List<Classification> classificationsInProgress;
 
 	private Thread classificationStatusPollingThread;
 	private boolean shutdownRequested;
+
+	public static final int RESULT_PROCESSING_THREADS = 2;// Two threads is a good limit here. The processing is very Elasticsearch heavy while looking up inferred-not-stated values.
+	private final ExecutorService classificationProcessingExecutor = Executors.newFixedThreadPool(RESULT_PROCESSING_THREADS);
 
 	private static final int SECOND = 1000;
 
 	private static final PageRequest PAGE_FIRST_1K = PageRequest.of(0, 1000);
 
 	private Logger logger = LoggerFactory.getLogger(getClass());
-	private static final SimpleDateFormat SIMPLE_DATE_FORMAT = new SimpleDateFormat("ddMMyyyy");
+	private static final SimpleDateFormat SIMPLE_DATE_FORMAT = new SimpleDateFormat("yyyyMMdd");
 
 	public ClassificationService() {
 		classificationsInProgress = new ArrayList<>();
 	}
 
 	@PostConstruct
-	private void init() {
+	private void init() throws ServiceException {
+
+		try {
+			if (!elasticsearchOperations.indexOps(Concept.class).exists()) {
+				throw new StartupException("Elasticsearch Concept index does not exist.");
+			}
+		} catch (UncategorizedExecutionException e) {
+			throw new StartupException("Not able to connect to Elasticsearch. " +
+					"Check that Elasticsearch is running and that you have the right version installed.", e);
+		}
+
 		NativeSearchQueryBuilder queryBuilder = new NativeSearchQueryBuilder()
 				.withQuery(termsQuery(Classification.Fields.STATUS, ClassificationStatus.SCHEDULED.name(), ClassificationStatus.RUNNING.name()))
 				.withPageable(PAGE_FIRST_1K);
 
 		// Mark running classifications as failed. This could be improved in the future.
 		final long[] failedCount = {0};
-		try (CloseableIterator<Classification> runningClassifications = elasticsearchOperations.stream(queryBuilder.build(), Classification.class)) {
-			runningClassifications.forEachRemaining(classification -> {
+		try (SearchHitsIterator<Classification> runningClassifications = elasticsearchOperations.searchForStream(queryBuilder.build(), Classification.class)) {
+			runningClassifications.forEachRemaining(hit -> {
+				Classification classification = hit.getContent();
 				classification.setStatus(ClassificationStatus.FAILED);
 				classification.setErrorMessage("Termserver restarted.");
 				classificationRepository.save(classification);
@@ -135,62 +159,81 @@ public class ClassificationService {
 		}
 
 		// Start thread to continuously fetch the status of remote classifications
-		// Copy the in-progress list to avoid long synchronized block
 		classificationStatusPollingThread = new Thread(() -> {
-			List<Classification> classificationsToCheck = new ArrayList<>();
 			try {
 				while (!shutdownRequested) {
 					try {
 						// Copy the in-progress list to avoid long synchronized block
+						List<Classification> classificationsToCheck;
 						synchronized (classificationsInProgress) {
-							classificationsToCheck.addAll(classificationsInProgress);
+							classificationsToCheck = new ArrayList<>(classificationsInProgress);
 						}
 						Date remoteClassificationCutoffTime = DateUtil.newDatePlus(Calendar.MINUTE, -abortRemoteClassificationAfterMinutes);
 						for (Classification classification : classificationsToCheck) {
 							ClassificationStatusResponse statusResponse = serviceClient.getStatus(classification.getId());
-							ClassificationStatus latestStatus = statusResponse.getStatus();
-							if (latestStatus == ClassificationStatus.FAILED) {
-								classification.setErrorMessage(statusResponse.getErrorMessage());
-								logger.warn("Remote classification failed with message:{}, developerMessage:{}",
-										statusResponse.getErrorMessage(), statusResponse.getDeveloperMessage());
+							ClassificationStatus newStatus = statusResponse.getStatus();
+							boolean timeout = false;
+
+							if (classification.getStatus() == newStatus) {
+								// No status change
+								// Check for timeout
+								if (classification.getCreationDate().before(remoteClassificationCutoffTime)) {
+									timeout = true;
+								} else {
+									// Nothing to do
+									continue;
+								}
 							}
-							else if (classification.getCreationDate().before(remoteClassificationCutoffTime)) {
-								latestStatus = ClassificationStatus.FAILED;
-								classification.setErrorMessage("Remote service taking too long.");
-							}
-							if (classification.getStatus() != latestStatus) {
 
-								Boolean inferredRelationshipChangesFound = null;
-								Boolean equivalentConceptsFound = null;
-								if (latestStatus == COMPLETED) {
-									try {
-										downloadRemoteResults(classification.getId());
+							if (timeout || classification.getStatus() != newStatus) {
+								// Status change to process
 
-										inferredRelationshipChangesFound = doGetRelationshipChanges(classification.getPath(), classification.getId(),
-												Config.DEFAULT_LANGUAGE_CODES, PageRequest.of(0, 1), false, null).getTotalElements() > 0;
-
-										equivalentConceptsFound = doGetEquivalentConcepts(classification.getPath(), classification.getId(),
-												Config.DEFAULT_LANGUAGE_CODES, PageRequest.of(0, 1)).getTotalElements() > 0;
-
-									} catch (IOException | ElasticsearchException e) {
-										latestStatus = ClassificationStatus.FAILED;
-										String message = "Failed to capture remote classification results.";
-										classification.setErrorMessage(message);
-										logger.error(message, e);
+								// Stop polling if no longer needed
+								if (newStatus != ClassificationStatus.SCHEDULED && newStatus != ClassificationStatus.RUNNING) {
+									synchronized (classificationsInProgress) {
+										classificationsInProgress.remove(classification);
 									}
 								}
 
-								classification.setInferredRelationshipChangesFound(inferredRelationshipChangesFound);
-								classification.setEquivalentConceptsFound(equivalentConceptsFound);
-								classification.setStatus(latestStatus);
-								classification.setCompletionDate(new Date());
-								classificationRepository.save(classification);
-								logger.info("Classification {} {}.", classification.getId(), classification.getStatus());
-							}
-							if (latestStatus != ClassificationStatus.SCHEDULED && latestStatus != ClassificationStatus.RUNNING) {
-								synchronized (classificationsInProgress) {
-									classificationsInProgress.remove(classification);
+								if (newStatus == ClassificationStatus.FAILED) {
+									classification.setErrorMessage(statusResponse.getErrorMessage());
+									logger.warn("Remote classification failed with message:{}, developerMessage:{}",
+											statusResponse.getErrorMessage(), statusResponse.getDeveloperMessage());
+								} else if (timeout) {
+									newStatus = ClassificationStatus.FAILED;
+									classification.setErrorMessage("Remote service taking too long.");
 								}
+
+								final ClassificationStatus newStatusFinal = newStatus;
+								classificationProcessingExecutor.submit(() -> {
+
+									classification.setStatus(newStatusFinal);
+
+									if (newStatusFinal == COMPLETED) {
+										try {
+											downloadRemoteResults(classification);
+
+											Boolean inferredRelationshipChangesFound = doGetRelationshipChanges(classification.getPath(), classification.getId(),
+													Config.DEFAULT_LANGUAGE_DIALECTS, PageRequest.of(0, 1), false, null).getTotalElements() > 0;
+
+											Boolean equivalentConceptsFound = doGetEquivalentConcepts(classification.getPath(), classification.getId(),
+													Config.DEFAULT_LANGUAGE_DIALECTS, PageRequest.of(0, 1)).getTotalElements() > 0;
+
+											classification.setInferredRelationshipChangesFound(inferredRelationshipChangesFound);
+											classification.setEquivalentConceptsFound(equivalentConceptsFound);
+											classification.setCompletionDate(new Date());
+
+										} catch (IOException | ElasticsearchException e) {
+											classification.setStatus(ClassificationStatus.FAILED);
+											String message = "Failed to capture remote classification results.";
+											classification.setErrorMessage(message);
+											logger.error(message, e);
+										}
+									}
+
+									classificationRepository.save(classification);
+									logger.info("Classification {} {}.", classification.getId(), classification.getStatus());
+								});
 							}
 							if (shutdownRequested) {
 								break;
@@ -199,7 +242,7 @@ public class ClassificationService {
 						classificationsToCheck.clear();
 						Thread.sleep(SECOND);
 
-					} catch (HttpClientErrorException e) {
+					} catch (RestClientException e) {
 						int coolOffSeconds = 30;
 						logger.warn("Problem with classification-service communication. Trying again in {} seconds.", coolOffSeconds, e);
 						// Let's wait a while before trying again
@@ -208,6 +251,8 @@ public class ClassificationService {
 				}
 			} catch (InterruptedException e) {
 				logger.info("Classification status polling thread interrupted.");
+			} catch (Exception e) {
+				logger.error("Unexpected exception in classification status polling thread.", e);
 			} finally {
 				logger.info("Classification status polling thread stopped.");
 			}
@@ -219,6 +264,7 @@ public class ClassificationService {
 	@PreDestroy
 	public void shutdownPolling() {
 		shutdownRequested = true;
+		classificationProcessingExecutor.shutdown();
 	}
 
 	public Page<Classification> findClassifications(String path) {
@@ -226,15 +272,14 @@ public class ClassificationService {
 				.withQuery(termQuery(Classification.Fields.PATH, path))
 				.withSort(SortBuilders.fieldSort(Classification.Fields.CREATION_DATE).order(SortOrder.ASC))
 				.withPageable(PAGE_FIRST_1K);
-		Page<Classification> classifications = elasticsearchOperations.queryForPage(queryBuilder.build(), Classification.class);
-		updateStatusIfStale(classifications.getContent(), path);
-		return classifications;
+		SearchHits<Classification> searchHits = elasticsearchOperations.search(queryBuilder.build(), Classification.class);
+		List<Classification>classifications = searchHits.stream().map(SearchHit::getContent).collect(Collectors.toList());
+		updateStatusIfStale(classifications, path);
+		return new PageImpl<>(classifications, PAGE_FIRST_1K, searchHits.getTotalHits());
 	}
 
 	public Classification findClassification(String path, String classificationId) {
-		GetQuery getQuery = new GetQuery();
-		getQuery.setId(classificationId);
-		Classification classification = elasticsearchOperations.queryForObject(getQuery, Classification.class);
+		Classification classification = elasticsearchOperations.get(classificationId, Classification.class);
 		if (classification == null || !path.equals(classification.getPath())) {
 			throw new NotFoundException("Classification not found on branch.");
 		}
@@ -290,64 +335,70 @@ public class ClassificationService {
 
 	@Async
 	public void saveClassificationResultsToBranch(String path, String classificationId, SecurityContext securityContext) {
-		SecurityContextHolder.setContext(securityContext);
-		Classification classification = classificationSaveStatusCheck(path, classificationId);
+		try {
+			SecurityContextHolder.setContext(securityContext);
+			Classification classification = classificationSaveStatusCheck(path, classificationId);
 
-		if (classification.getInferredRelationshipChangesFound()) {
-			classification.setStatus(SAVING_IN_PROGRESS);
-			classificationRepository.save(classification);
+			if (classification.getInferredRelationshipChangesFound()) {
+				classification.setStatus(SAVING_IN_PROGRESS);
+				classificationRepository.save(classification);
 
-			try {
-				// Commit in auto-close try block like this will roll back if an exception is thrown
-				try (Commit commit = branchService.openCommit(path, branchMetadataHelper.getBranchLockMetadata("Saving classification " + classification.getId()))) {
+				try {
+					// Commit in auto-close try block like this will roll back if an exception is thrown
+					try (Commit commit = branchService.openCommit(path, branchMetadataHelper.getBranchLockMetadata("Saving classification " + classification.getId()))) {
+						commit.getBranch().getMetadata().put(DISABLE_CONTENT_AUTOMATIONS_METADATA_KEY, "true");
 
-					NativeSearchQueryBuilder queryBuilder = new NativeSearchQueryBuilder()
-							.withQuery(termQuery("classificationId", classificationId))
-							.withSort(new FieldSortBuilder(RelationshipChange.Fields.SOURCE_ID))
-							.withSort(new FieldSortBuilder(RelationshipChange.Fields.GROUP))
-							.withSort(new FieldSortBuilder(RelationshipChange.Fields.SORT_NUMBER))// This gives a guaranteed sort order for a reliable stateless stream
-							.withPageable(LARGE_PAGE);
-					try (CloseableIterator<RelationshipChange> relationshipChangeStream = elasticsearchOperations.statelessStream(queryBuilder.build(), RelationshipChange.class)) {
-						while (relationshipChangeStream.hasNext()) {
-							List<RelationshipChange> changesBatch = new ArrayList<>();
-							int i = 0;
-							while (i++ < 10_000 && relationshipChangeStream.hasNext()) {
-								changesBatch.add(relationshipChangeStream.next());
+						NativeSearchQueryBuilder queryBuilder = new NativeSearchQueryBuilder()
+								.withQuery(termQuery("classificationId", classificationId))
+								.withSort(new FieldSortBuilder(RelationshipChange.Fields.SOURCE_ID))
+								.withSort(new FieldSortBuilder(RelationshipChange.Fields.GROUP))
+								.withSort(new FieldSortBuilder(RelationshipChange.Fields.SORT_NUMBER))// This gives a guaranteed sort order for a reliable stateless stream
+								.withPageable(LARGE_PAGE);
+						try (SearchHitsIterator<RelationshipChange> relationshipChangeStream = elasticsearchOperations.searchForStream(queryBuilder.build(), RelationshipChange.class)) {
+							while (relationshipChangeStream.hasNext()) {
+								List<RelationshipChange> changesBatch = new ArrayList<>();
+								int i = 0;
+								while (i++ < 10_000 && relationshipChangeStream.hasNext()) {
+									changesBatch.add(relationshipChangeStream.next().getContent());
+								}
+
+								// Group changes by concept
+								Map<Long, List<RelationshipChange>> conceptToChangeMap = new Long2ObjectOpenHashMap<>();
+								for (RelationshipChange relationshipChange : changesBatch) {
+									conceptToChangeMap.computeIfAbsent(parseLong(relationshipChange.getSourceId()), conceptId -> new ArrayList<>()).add(relationshipChange);
+								}
+
+								// Load concepts
+								Collection<Concept> concepts = conceptService.find(path, conceptToChangeMap.keySet(), Config.DEFAULT_LANGUAGE_DIALECTS);
+
+								// Apply changes to concepts
+								for (Concept concept : concepts) {
+									List<RelationshipChange> relationshipChanges = conceptToChangeMap.get(concept.getConceptIdAsLong());
+									applyRelationshipChangesToConcept(concept, relationshipChanges, false);
+								}
+
+								// Update concepts
+								conceptService.updateWithinCommit(concepts, commit);
 							}
-
-							// Group changes by concept
-							Map<Long, List<RelationshipChange>> conceptToChangeMap = new Long2ObjectOpenHashMap<>();
-							for (RelationshipChange relationshipChange : changesBatch) {
-								conceptToChangeMap.computeIfAbsent(parseLong(relationshipChange.getSourceId()), conceptId -> new ArrayList<>()).add(relationshipChange);
-							}
-
-							// Load concepts
-							Collection<Concept> concepts = conceptService.find(path, conceptToChangeMap.keySet(), Config.DEFAULT_LANGUAGE_CODES);
-
-							// Apply changes to concepts
-							for (Concept concept : concepts) {
-								List<RelationshipChange> relationshipChanges = conceptToChangeMap.get(concept.getConceptIdAsLong());
-								applyRelationshipChangesToConcept(concept, relationshipChanges, false);
-							}
-
-							// Update concepts
-							conceptService.updateWithinCommit(concepts, commit);
 						}
+
+						commit.getBranch().getMetadata().remove(DISABLE_CONTENT_AUTOMATIONS_METADATA_KEY);
+						commit.markSuccessful();
+						classification.setStatus(SAVED);
+						classification.setSaveDate(new Date());
 					}
-
-					commit.markSuccessful();
-					classification.setStatus(SAVED);
-					classification.setSaveDate(new Date());
+				} catch (ServiceException e) {
+					classification.setStatus(SAVE_FAILED);
+					logger.error("Classification save failed {} {}", classification.getPath(), classificationId, e);
 				}
-			} catch (ServiceException e) {
-				classification.setStatus(SAVE_FAILED);
-				logger.error("Classification save failed {} {}", classification.getPath(), classificationId, e);
+			} else {
+				classification.setStatus(SAVED);
 			}
-		} else {
-			classification.setStatus(SAVED);
-		}
 
-		classificationRepository.save(classification);
+			classificationRepository.save(classification);
+		} finally {
+			SecurityContextHolder.clearContext();
+		}
 	}
 
 	public Classification classificationSaveStatusCheck(String path, String classificationId) {
@@ -412,12 +463,12 @@ public class ClassificationService {
 		}
 	}
 
-	public Page<RelationshipChange> getRelationshipChanges(String path, String classificationId, List<String> languageCodes, PageRequest pageRequest) {
+	public Page<RelationshipChange> getRelationshipChanges(String path, String classificationId, List<LanguageDialect> languageDialects, PageRequest pageRequest) {
 		checkClassificationHasResults(path, classificationId);
-		return doGetRelationshipChanges(path, classificationId, languageCodes, pageRequest, true, null);
+		return doGetRelationshipChanges(path, classificationId, languageDialects, pageRequest, true, null);
 	}
 
-	private Page<RelationshipChange> doGetRelationshipChanges(String path, String classificationId, List<String> languageCodes, PageRequest pageRequest, boolean fetchDescriptions, String sourceIdFilter) {
+	private Page<RelationshipChange> doGetRelationshipChanges(String path, String classificationId, List<LanguageDialect> languageDialects, PageRequest pageRequest, boolean fetchDescriptions, String sourceIdFilter) {
 
 		Page<RelationshipChange> relationshipChanges =
 				sourceIdFilter != null ?
@@ -427,9 +478,9 @@ public class ClassificationService {
 		Map<String, ConceptMini> conceptMiniMap = new HashMap<>();
 		for (RelationshipChange relationshipChange : relationshipChanges) {
 			if (fetchDescriptions) {
-				relationshipChange.setSource(conceptMiniMap.computeIfAbsent(relationshipChange.getSourceId(), conceptId -> new ConceptMini(conceptId, languageCodes)));
-				relationshipChange.setDestination(conceptMiniMap.computeIfAbsent(relationshipChange.getDestinationId(), conceptId -> new ConceptMini(conceptId, languageCodes)));
-				relationshipChange.setType(conceptMiniMap.computeIfAbsent(relationshipChange.getTypeId(), conceptId -> new ConceptMini(conceptId, languageCodes)));
+				relationshipChange.setSource(conceptMiniMap.computeIfAbsent(relationshipChange.getSourceId(), conceptId -> new ConceptMini(conceptId, languageDialects)));
+				relationshipChange.setDestination(conceptMiniMap.computeIfAbsent(relationshipChange.getDestinationId(), conceptId -> new ConceptMini(conceptId, languageDialects)));
+				relationshipChange.setType(conceptMiniMap.computeIfAbsent(relationshipChange.getTypeId(), conceptId -> new ConceptMini(conceptId, languageDialects)));
 			}
 		}
 		if (fetchDescriptions) {
@@ -439,29 +490,29 @@ public class ClassificationService {
 		return relationshipChanges;
 	}
 
-	public Page<EquivalentConceptsResponse> getEquivalentConcepts(String path, String classificationId, List<String> languageCodes, PageRequest pageRequest) {
+	public Page<EquivalentConceptsResponse> getEquivalentConcepts(String path, String classificationId, List<LanguageDialect> languageDialects, PageRequest pageRequest) {
 		checkClassificationHasResults(path, classificationId);
-		return doGetEquivalentConcepts(path, classificationId, languageCodes, pageRequest);
+		return doGetEquivalentConcepts(path, classificationId, languageDialects, pageRequest);
 	}
 
-	public Concept getConceptPreview(String path, String classificationId, String conceptId, List<String> languageCodes) throws ServiceException {
+	public Concept getConceptPreview(String path, String classificationId, String conceptId, List<LanguageDialect> languageDialects) throws ServiceException {
 		checkClassificationHasResults(path, classificationId);
 
-		Concept concept = conceptService.find(conceptId, languageCodes, path);
-		Page<RelationshipChange> conceptRelationshipChanges = doGetRelationshipChanges(path, classificationId, languageCodes, LARGE_PAGE, true, conceptId);
+		Concept concept = conceptService.find(conceptId, languageDialects, path);
+		Page<RelationshipChange> conceptRelationshipChanges = doGetRelationshipChanges(path, classificationId, languageDialects, LARGE_PAGE, true, conceptId);
 		applyRelationshipChangesToConcept(concept, conceptRelationshipChanges.getContent(), true);
 
 		return concept;
 	}
 
-	private Page<EquivalentConceptsResponse> doGetEquivalentConcepts(String path, String classificationId, List<String> languageCodes, PageRequest pageRequest) {
+	private Page<EquivalentConceptsResponse> doGetEquivalentConcepts(String path, String classificationId, List<LanguageDialect> languageDialects, PageRequest pageRequest) {
 		Page<EquivalentConcepts> relationshipChanges = equivalentConceptsRepository.findByClassificationId(classificationId, pageRequest);
 		if (relationshipChanges.getTotalElements() == 0) {
 			return new PageImpl<>(Collections.emptyList());
 		}
 
 		Set<String> conceptIds = relationshipChanges.getContent().stream().map(EquivalentConcepts::getConceptIds).flatMap(Collection::stream).collect(Collectors.toSet());
-		Map<String, ConceptMini> conceptMiniMap = conceptService.findConceptMinis(path, conceptIds, languageCodes).getResultsMap();
+		Map<String, ConceptMini> conceptMiniMap = conceptService.findConceptMinis(path, conceptIds, languageDialects).getResultsMap();
 		List<EquivalentConceptsResponse> responseContent = new ArrayList<>();
 		for (EquivalentConcepts equivalentConcepts : relationshipChanges.getContent()) {
 			HashSet<ConceptMini> concepts = new HashSet<>();
@@ -481,22 +532,22 @@ public class ClassificationService {
 		}
 	}
 
-	private void downloadRemoteResults(String classificationId) throws IOException, ElasticsearchException {
-		logger.info("Downloading remote classification results for {}", classificationId);
-		try (ZipInputStream rf2ResultsZipStream = new ZipInputStream(serviceClient.downloadRf2Results(classificationId))) {
+	private void downloadRemoteResults(Classification classification) throws IOException, ElasticsearchException {
+		logger.info("Downloading remote classification results for {}", classification.getId());
+		try (ZipInputStream rf2ResultsZipStream = new ZipInputStream(serviceClient.downloadRf2Results(classification.getId()))) {
 			ZipEntry zipEntry;
 			while ((zipEntry = rf2ResultsZipStream.getNextEntry()) != null) {
 				if (zipEntry.getName().contains("sct2_Relationship_Delta")) {
-					saveRelationshipChanges(classificationId, rf2ResultsZipStream);
+					saveRelationshipChanges(classification, rf2ResultsZipStream);
 				}
 				if (zipEntry.getName().contains("der2_sRefset_EquivalentConceptSimpleMapDelta")) {
-					saveEquivalentConcepts(classificationId, rf2ResultsZipStream);
+					saveEquivalentConcepts(classification.getId(), rf2ResultsZipStream);
 				}
 			}
 		}
 	}
 
-	void saveRelationshipChanges(String classificationId, InputStream rf2Stream) throws IOException, ElasticsearchException {
+	void saveRelationshipChanges(Classification classification, InputStream rf2Stream) throws IOException, ElasticsearchException {
 		// Leave the stream open after use.
 		BufferedReader reader = new BufferedReader(new InputStreamReader(rf2Stream));
 
@@ -513,7 +564,7 @@ public class ClassificationService {
 			active = "1".equals(values[RelationshipFieldIndexes.active]);
 			relationshipChanges.add(new RelationshipChange(
 					recordSortNumber++,
-					classificationId,
+					classification.getId(),
 					values[RelationshipFieldIndexes.id],
 					active,
 					values[RelationshipFieldIndexes.sourceId],
@@ -532,11 +583,13 @@ public class ClassificationService {
 		NumberFormat numberFormat = NumberFormat.getIntegerInstance();
 		if (activeRows > 0) {
 			logger.info("Looking up 'inferred not previously stated' values for {} active inferred relationship changes for classification {}.",
-					numberFormat.format(activeRows), classificationId);
+					numberFormat.format(activeRows), classification.getId());
 		}
 		long rowsProcessed = 0;
 		Map<Long, List<RelationshipChange>> activeConceptChanges = new HashMap<>();
-		for (List<RelationshipChange> relationshipChangePartition : Lists.partition(relationshipChanges, 900)) {
+
+		// The max clauses for bool query in elastic search by default is 1024
+		for (List<RelationshipChange> relationshipChangePartition : Lists.partition(relationshipChanges, 1000)) {
 			BoolQueryBuilder allConceptsQuery = boolQuery();
 			for (RelationshipChange relationshipChange : relationshipChangePartition) {
 				if (relationshipChange.isActive()) {
@@ -552,25 +605,34 @@ public class ClassificationService {
 					activeConceptChanges.computeIfAbsent(sourceId, id -> new ArrayList<>()).add(relationshipChange);
 					rowsProcessed++;
 					if (rowsProcessed % 1_000 == 0) {
-						logger.info("Processing row {} of {} for classification {}", numberFormat.format(rowsProcessed), numberFormat.format(activeRows), classificationId);
+						logger.info("Processing row {} of {} for classification {}", numberFormat.format(rowsProcessed), numberFormat.format(activeRows), classification.getId());
 					}
 				}
 			}
-			try (CloseableIterator<QueryConcept> semanticIndexConcepts = elasticsearchOperations.stream(
+
+			// make sure the should clause is not empty before running semantic index search
+			if (allConceptsQuery.should().isEmpty()) {
+				continue;
+			}
+
+			BranchCriteria branchCriteria = versionControlHelper.getBranchCriteria(classification.getPath());
+			try (SearchHitsIterator<QueryConcept> semanticIndexConcepts = elasticsearchOperations.searchForStream(
 					new NativeSearchQueryBuilder()
-							.withQuery(termQuery(QueryConcept.Fields.STATED, true))
+							.withQuery(boolQuery()
+									.must(branchCriteria.getEntityBranchCriteria(QueryConcept.class))
+									.must(termQuery(QueryConcept.Fields.STATED, true)))
 							.withFilter(allConceptsQuery)
 							.withPageable(LARGE_PAGE).build(),
 					QueryConcept.class)) {
 
-				semanticIndexConcepts.forEachRemaining(semanticIndexConcept -> {
+				semanticIndexConcepts.forEachRemaining(hit -> {
 					// One or more inferred attributes or parents do not exist on this stated semanticIndexConcept
-					List<RelationshipChange> conceptChanges = activeConceptChanges.get(semanticIndexConcept.getConceptIdL());
+					List<RelationshipChange> conceptChanges = activeConceptChanges.get(hit.getContent().getConceptIdL());
 					if (conceptChanges != null) {
-						Map<String, Set<String>> conceptAttributes = semanticIndexConcept.getAttr();
+						Map<String, Set<String>> conceptAttributes = hit.getContent().getAttr();
 						for (RelationshipChange relationshipChange : conceptChanges) {
 							if (relationshipChange.getTypeId().equals(Concepts.ISA)) {
-								if (!semanticIndexConcept.getParents().contains(parseLong(relationshipChange.getDestinationId()))) {
+								if (!hit.getContent().getParents().contains(parseLong(relationshipChange.getDestinationId()))) {
 									relationshipChange.setInferredNotStated(true);
 								}
 							} else {

@@ -4,17 +4,15 @@ import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonView;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.snomed.snowstorm.core.pojo.LanguageDialect;
 import org.snomed.snowstorm.rest.View;
+import org.springframework.data.annotation.Transient;
 import org.springframework.data.elasticsearch.annotations.Document;
 import org.springframework.data.elasticsearch.annotations.Field;
 import org.springframework.data.elasticsearch.annotations.FieldType;
-
 import javax.validation.constraints.NotNull;
 import javax.validation.constraints.Size;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.Map;
-import java.util.Set;
+import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -35,69 +33,76 @@ public class Description extends SnomedComponent<Description> implements SnomedC
 	}
 
 	@JsonView(value = View.Component.class)
-	@Field(type = FieldType.keyword, store = true)
+	@Field(type = FieldType.Keyword, store = true)
 	@Size(min = 5, max = 18)
 	private String descriptionId;
 
 	@JsonView(value = View.Component.class)
-	@Field(type = FieldType.keyword)
+	@Field(type = FieldType.Keyword)
 	@NotNull
 	private String term;
 
-	@Field(type = FieldType.text)
+	@Field(type = FieldType.Text)
 	private String termFolded;
 
 	@Field(type = FieldType.Integer)
 	private int termLen;
 
-	@Field(type = FieldType.keyword)
+	@Field(type = FieldType.Keyword)
 	private String tag;
 
 	@JsonView(value = View.Component.class)
-	@Field(type = FieldType.keyword, store = true)
+	@Field(type = FieldType.Keyword, store = true)
 	private String conceptId;
 
 	@JsonView(value = View.Component.class)
-	@Field(type = FieldType.keyword)
+	@Field(type = FieldType.Keyword)
 	@NotNull
 	@Size(min = 5, max = 18)
 	private String moduleId;
 
-	@Field(type = FieldType.keyword)
+
+	@Field(type = FieldType.Keyword)
 	@NotNull
 	@Size(min = 2, max = 2)
 	private String languageCode;
 
 	@JsonView(value = View.Component.class)
-	@Field(type = FieldType.keyword)
+	@Field(type = FieldType.Keyword)
 	@NotNull
 	@Size(min = 5, max = 18)
 	private String typeId;
 
-	@Field(type = FieldType.keyword)
+	@Field(type = FieldType.Keyword)
 	@NotNull
 	@Size(min = 5, max = 18)
 	private String caseSignificanceId;
 
 	// Populated when requesting an update
+	@Transient
 	private Map<String, String> acceptabilityMap;
 
 	@JsonIgnore
 	// Populated manually when loading from store
+	@Transient
 	private Map<String, ReferenceSetMember> langRefsetMembers;
 
 	@JsonIgnore
+	@Transient
 	private Set<ReferenceSetMember> inactivationIndicatorMembers;
 
 	@JsonIgnore
 	// Populated when requesting an update
+	@Transient
 	private String inactivationIndicatorName;
 
 	@JsonIgnore
+	@Transient
 	private Set<ReferenceSetMember> associationTargetMembers;
 
 	@JsonIgnore
 	// Populated when requesting an update
+	@Transient
 	private Map<String, Set<String>> associationTargetStrings;
 
 	private static final Logger logger = LoggerFactory.getLogger(Description.class);
@@ -135,6 +140,7 @@ public class Description extends SnomedComponent<Description> implements SnomedC
 		this.typeId = typeId;
 		setTerm(term);
 		this.caseSignificanceId = caseSignificanceId;
+		this.tag = getTag();
 	}
 
 	@Override
@@ -163,8 +169,10 @@ public class Description extends SnomedComponent<Description> implements SnomedC
 		return Concepts.descriptionTypeNames.get(typeId);
 	}
 
-	public void setType(String type) {
+	public Description setType(String type) {
 		typeId = Concepts.descriptionTypeNames.inverse().get(type);
+		this.tag = getTag();
+		return this;
 	}
 
 	@JsonView(value = View.Component.class)
@@ -274,7 +282,15 @@ public class Description extends SnomedComponent<Description> implements SnomedC
 
 	@JsonIgnore
 	public ReferenceSetMember getInactivationIndicatorMember() {
-		return !inactivationIndicatorMembers.isEmpty() ? inactivationIndicatorMembers.iterator().next() : null;
+		Set<ReferenceSetMember> inactivationIndicatorMembers = getInactivationIndicatorMembers();
+		if (inactivationIndicatorMembers != null) {
+			for (ReferenceSetMember inactivationIndicatorMember : inactivationIndicatorMembers) {
+				if (inactivationIndicatorMember.isActive()) {
+					return inactivationIndicatorMember;
+				}
+			}
+		}
+		return null;
 	}
 
 	/*
@@ -339,6 +355,7 @@ public class Description extends SnomedComponent<Description> implements SnomedC
 		if (term != null) {
 			termLen = term.length();
 		}
+		this.tag = getTag();
 	}
 
 	public String getTermFolded() {
@@ -399,6 +416,7 @@ public class Description extends SnomedComponent<Description> implements SnomedC
 
 	public Description setTypeId(String typeId) {
 		this.typeId = typeId;
+		this.tag = getTag();
 		return this;
 	}
 
@@ -458,22 +476,56 @@ public class Description extends SnomedComponent<Description> implements SnomedC
 				'}';
 	}
 
-	public boolean hasAcceptability(String acceptability, String refsetId) {
-		ReferenceSetMember entry = langRefsetMembers.get(refsetId);
+	//TODO would be better to agree if refsetIds are Strings or Long and make consistent everywhere
+	public boolean hasAcceptability(String acceptability, Object refsetId) {
+		ReferenceSetMember entry = langRefsetMembers.get(refsetId.toString());
 		return (entry != null 
 				&& entry.isActive() 
-				&& entry.getAdditionalField(ReferenceSetMember.LanguageFields.ACCEPTABILITY_ID).equals(acceptability));
+				&& (acceptability == null || entry.getAdditionalField(ReferenceSetMember.LanguageFields.ACCEPTABILITY_ID).equals(acceptability)));
 	}
 	
 	/**
+	 * @param acceptability one of Concept.PREFERRED, Concept.ACCEPTABLE or null for either
 	 * @return true if the description has that acceptability in ANY langrefset
 	 */
 	public boolean hasAcceptability(String acceptability) {
 		for (ReferenceSetMember entry : langRefsetMembers.values()) {
-			if (entry.isActive() && entry.getAdditionalField(ReferenceSetMember.LanguageFields.ACCEPTABILITY_ID).equals(acceptability)) {
+			if (entry.isActive() 
+					&& acceptability == null || entry.getAdditionalField(ReferenceSetMember.LanguageFields.ACCEPTABILITY_ID).equals(acceptability)) {
 				return true;
 			}
 		}
 		return false;
+	}
+	
+	/**
+	 * @return true if the description is either accepted or preferred 
+	 * in the given language refset 
+	 */
+	public boolean hasLanguageRefset(Long langRefsetId) {
+		String langRefsetIdStr = langRefsetId.toString();
+		return langRefsetMembers.values().stream()
+				.filter(l -> l.isActive())
+				.anyMatch(l ->l.getRefsetId().equals(langRefsetIdStr));
+	}
+	
+	/**
+	 * @return true if the description has the specified acceptability (or either, if null)
+	 * for the given language refset and/or language where specified in the dialect
+	 */
+	public boolean hasAcceptability(String acceptability, LanguageDialect dialect) {
+		//Is the language refset specified in the dialect?
+		if (dialect.getLanguageReferenceSet() != null) {
+			return hasAcceptability(acceptability, dialect.getLanguageReferenceSet());
+		} 
+		//Fall back to just checking the language is as specified
+		return languageCode.equals(dialect.getLanguageCode());
+	}
+	
+	/**
+	 * @return true if the description has any acceptability in any of the dialects specified
+	 */
+	public boolean hasAcceptability(List<LanguageDialect> dialects) {
+		return dialects.stream().anyMatch(d -> hasAcceptability(null, d));
 	}
 }

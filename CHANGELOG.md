@@ -3,6 +3,236 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The change log format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+
+## 5.0.6 Release - 2020-10-16 - Fixes and Improvements
+
+### Features
+- New description search mode for whole words in addition to the word prefix and regex modes.
+- #145 ECL query concept validation. If any concept in the query is not present and active on the branch 400 (Bad Request) is returned. Thank you to @jbarcas for this.
+- #142 Allow description bulk fetch by conceptId. Thanks again to @jbarcas !
+
+### Improvements
+- Add extension preferred terms to concept TSV download.
+- Docker documentation improvements.
+
+### Fixes
+- Many pagination and search results totals fixes including #161
+- #132 Fix FHIR Medication response.
+- #164 Fix docker config. Don't expose Elasticsearch port.
+- #167 Enforce shutdown when `--exit` flag used.
+- Admin function to clean up partial commit and unlock branch.
+
+
+## 5.0.2 Release - 2020-09-22 - Major Release for Elasticsearch 7
+New major release to support Elasticsearch 7 because Elasticsearch 6 is due to reach End Of Life.
+
+Upgrade hints: Snapshot backup from Elasticsearch 6 can be restored into an Elasticsearch 7 cluster.
+See [Elasticsearch upgrading documentation](https://www.elastic.co/guide/en/cloud/current/ec-upgrading-v7.html) for further information.
+
+### Breaking
+- Elasticsearch 7.6.x or greater MUST be used with this release.
+
+### Features
+- Support for Elasticsearch 7.x
+
+### Improvements
+- New section in Extension setup documentation for SNOMED Identifier Generation.
+- Handle Elasticsearch timeout exception gracefully during content commit.
+
+### Fixes
+- Minor fixes to FHIR documentation links.
+
+## 4.13.0 Release - 2020-08-11 - Minor Improvement Release
+
+Minor improvement release before the next major release with Elasticsearch 7 support.
+
+### Improvements
+- Implement #135 - Option to return just concept identifiers in ECL results for ~5x performance improvement for large queries. Use `returnIdOnly` in request to `GET /{branch}/concepts`.
+
+
+## 4.12.1 Release - 2020-07-16 - Role Based Access Control
+
+Role based access control has been applied to the API to restrict which users can perform administration and authoring functions when not in read-only mode.  
+See [Security Configuration Guide](docs/security-configuration.md).
+
+### Features
+- Role based access control
+  - Roles can be assigned at global or branch level to user groups via the admin API.
+  - Extendable solution allows granting branch permission to user groups using any role name. Useful for complex user interfaces.
+  - List of roles displayed on each branch for the current user.
+  - Roles `ADMIN` and `AUTHOR` applied to relevant API functions.
+  - Careful cache design mitigates any RBAC performance impact.  
+
+### Improvements
+- Improved logging for axiom expression parsing errors.
+- Add optional code system `maintainerType` field to aid extension categorisation and filtering in UIs.
+- Add code system listing `forBranch` parameter which allows code system lookup using any ancestor branch.
+
+#### FHIR API Improvements
+- [FHIR documentation](docs/using-the-fhir-api.md) split into individual markdown files for each resource and operation
+- The ValueSet $expand operation will now return an error if a request is made using the 'version' parameter.  This parameter is not supported by this operation and the error message will direct the user to use 'system-version' or 'force-system-version' instead.
+
+### Fixes
+- Add flag to opt in to content automations when upgrading extensions (only required in authoring environments).
+- Authentication session memory leak fixed from previous RBAC solution.
+- Fix for release-fix-branch promotion function when deletions are the only change.
+- Allow batch job status to be access immediately after creation.
+
+#### FHIR API Fixes
+- The ConceptMap $translate operation now correctly determines which on which branch to look up the specific map, based on an (optional) full URI in the url parameter.
+
+
+## 4.11.0 Release - Extension Authoring Upgrade Automations and UI Support
+
+Features have been added to automate aspects of extension maintenance when upgrading to a new International release.  
+See "Upgrading to a new International Release" in [Extension Authoring](docs/extension-authoring.md).
+
+### Features
+- Extension authoring upgrade support.
+  - Enhanced branch integrity check which includes source concept and can be combined with a fix branch during the upgrade process.
+  - Automatic integrity check and marking of branch with issues during upgrade process and fix promotions.
+  - Automatic inactivation of language refset members which reference inactive descriptions.
+  - Automatic inactivation of additional axioms which belong to an inactive concept.
+  - Automatic addition of concept not current indicators for descriptions which reference inactive concepts.
+  - Historic associations can be fetched from API to support update of existing axioms via UI.
+
+### Improvements
+- Fix #107 Add multi-module parameter to description search API.
+- Allow concept bulk fetch by descriptionId.
+- Allow versioned concepts to be deleted using the `force` flag.
+
+#### FHIR API Improvements
+- CodeSystem $lookup operation now supports 'property=*' to indicate that all known properties should be returned.
+- When ValueSet $validate-code operation is called specifying a refset that either does not exist or contains no active members, an enhanced error message will now alert the user to this situation.
+- ConceptMap $translate now allows inactivation indicators to be recovered.
+
+### Fixes
+- Allow batch job status to be access immediately after creation.
+- Fix concept search when filtering by single conceptId.
+- Prevent duplicate semantic index entries by adding hashcode and equals methods.
+- Update UK extension module to `83821000000107`, thanks @lawley.
+
+#### FHIR API Fixes
+- Fix for Null Pointer Exception when source or target is omitted in a ConceptMap $translate operation
+
+
+## 4.10.2 Release - 2020-05-27
+
+This release features many new capabilities and improvements to the FHIR API as well as some other general improvements and minor fixes.
+
+### Features
+- FHIR
+  - Add TerminologyCapabilities endpoint.
+  - Implement list all ValueSets.
+  - Implement search ValueSets.
+  - Add support for validate-code operation in CodeSystem.
+  - Add support for validate-code operation in ValueSet.
+  - Add support for subsumes operation.
+  - Add SCRUD support for StructureDefinition Resources.
+- Authoring
+  - MRCM Maintenance - Automatic generation of MRCM domain templates, triggered by changes to the MRCM refsets.
+  - Function to generate language refset changes for extensions that base their language refset on an international one (for example IE or NZ).
+### Improvements
+- RF2 import skips empty lines
+- Configuration
+  - New flag to enable CIS ID registration process. The out-of-the-box setup uses an internal id generator so ID registration is now disabled by default.
+  - Switch Canadian English codesystem shortname to SNOMEDCT-CA.
+- FHIR
+  - Make JSON the default response format when common browser headers detected, (format=json removed from examples).
+  - Fix #114 Allow use of version 'UNVERSIONED' to indicate unpublished content should be used. By using the code system / daily build branch rather than a version branch.
+  - Update HAPI library to 4.2.0.
+  - FHIR Base URL to respond with simple webpage rather than metadata redirect.
+  - CodeSystem $lookup uses PT rather than FSN.
+  - ValueSet supports all specified search parameters and text modes where possible.
+  - Add support for specifying FHIR system-version when expanding a ValueSet.
+  - Add support for specifying language refset SCTID as designation in a ValueSet expansion.
+  - Add support for en-x-NNNNNN in language headers.
+  - Add support for ICD-0 map translations.
+  - Add support for VS expansion force-system-version parameter.
+  - Attempt expansion of ValueSet prior to creation.
+- Snowstorm API
+  - Fix #107 Add multi-module parameter to description search API.
+  - Bulk load concepts by description id.
+- Authoring
+  - Add API for bulk refset member deletion.
+  - Add API for bulk relationship deletion.
+- Admin Functions
+  - Function to restore released flag and associated fields of concept and related components.
+### Fixes
+- Branch child listing pagination.
+- Search
+  - Fix #106 Allow concept search by ECL filtered by conceptId list.
+  - Fix MRCM attribute range search, use inferred form not stated.
+- FHIR
+  - Fix #112 Missing version when expanding stored valueset caused failure to determine correct branch.
+  - Fix term search in non-english languages.
+  - Meaningful error message when version parameter contains full SNOMED URI instead of YYYYMMDD.
+- Authoring
+  - Cleaner incremental semantic index updates.
+  - Promote release patch function only sets component effectiveTime if blank.
+  - Exclude parents of GCI axioms when calculating concept Authoring Form.
+- Build
+  - Make unit test elasticsearch node startup time configurable using `-Dtest.elasticsearch.start-timeout-mins=10`.
+
+
+## 4.8.0 Release - 2019-03-20
+
+This release includes a new cross-extension term search. Find it under "MultiSearch" in the Swagger docs. The functionality can be used in the [public browser](https://browser.ihtsdotools.org/) under "Go browsing... All Editions".
+
+This release also includes some important stability fixes for extension management, the daily build process and branch merging during authoring.
+
+### Features
+- New API for searching across all loaded code systems (Editions and Extensions).
+### Improvements
+- Fix #102 Add moduleId in relationship target of concept browser format.
+- Code System response now includes `dependantVersionEffectiveTime`.
+- Pretty print for JSON responses.
+- FSN selected using language only when no language refset included in the release (Australian Edition).
+- Snowstorm reconnects automatically if Classification Service is restarted.
+- Classification Service results are processed concurrently.
+- Admin functions for content management and fixes:
+  - Delete inferred relationships which are not present in a provided file.
+  - Patch function to merge fixes to the last release commit, back in time (during an authoring cycle).
+  - Function to find any duplicate component versions and hide the version from the parent branch.
+  - Function to clone a task branch, for debugging authoring content.
+- New Snowstorm logo. SVG included.
+### Fixes
+- Upgrading extensions with 300K+ refset members (e.g. US Edition) no longer fails. Better batch processing.
+- Daily Build fixes
+  - Local filesystem source configuration fixed.
+  - Process no longer reverts an extension upgrade commit.
+  - Process no longer reverts an extension creation commit.
+- RF2 import no longer fails if reference set member has multiple trailing empty columns.
+- MRCM type-ahead excludes inactive terms.
+- Rebase merge can no longer cause duplicate components. Branch review is now mandatory to rebase a diverged branch and the scope of branch reviews has been corrected.
+- Code System field `dependantVersion` has been removed from responses because it did not function correctly.
+
+
+## 4.5.0 Release - 2019-11-20
+
+Some small features and enhancements for the community and to support an update to the SNOMED International public browser.
+
+### Features
+- Pull request #85 New config flag to make concept bulk-load accessible when in read-only mode.
+- API to list all active semantic tags including concept count.
+- Descendants count option on concept, children and parents API endpoints.
+- Type filter on Description search.
+- API for deletion of single descriptions and relationships including force flag.
+### Improvements
+- Updates to documentation on extension management.
+- FHIR API
+  - Make JSON the default response.
+  - Support expansion examination of the "compose" element.
+- Fix #80 Human readable error when Snowstorm fails to connect to Elastic.
+- Prevent description aggregation requests which take a very long time.
+- Add conceptIds parameter to browser concept list API.
+- Upgrade SNOMED Drools Engine.
+### Fixes
+- Fix URL mapping for bulk concept validation.
+- Fix delta import marking unpublished reference set members as released.
+
+
+
 ## 4.4.0 Release - 2019-10-11 - International Authoring platform using Snowstorm
 
 Since 4.1.0 we have made many minor and patch releases during preparation for another Snowstorm milestone.
@@ -10,9 +240,9 @@ I am very pleased to announce that we have now gone live with Snowstorm as the T
 
 As usual we have also had plenty of engagement from the community with many questions, issues and pull requests coming through. Thank you.
 
-Please note the new approach to importing and upgrading extensions. The Code System _migrate_ function is now deprecated in favour of the new _upgrade_ function. 
-Code System branches should be created directly under `MAIN` rather than under a version branch. For example `MAIN/SNOMEDCT-US`. 
-Using the _upgrade_ function Snowstorm will rebase the Code System branch to the a specific point on the timeline of the parent branch where the requested version 
+Please note the new approach to importing and upgrading extensions. The Code System _migrate_ function is now deprecated in favour of the new _upgrade_ function.
+Code System branches should be created directly under `MAIN` rather than under a version branch. For example `MAIN/SNOMEDCT-US`.
+Using the _upgrade_ function Snowstorm will rebase the Code System branch to the a specific point on the timeline of the parent branch where the requested version
 was created, without having to use release branches like `MAIN/2019-07-31`.
 
 I hope you find this release useful and as always please just reach out or raise an issue if you have questions.
@@ -89,18 +319,18 @@ I hope you find this release useful and as always please just reach out or raise
 This major version includes the API for the SNOMED International public SNOMEDCT browser!
 The browser descriptions endpoint is now faster and includes the full set of aggregations and filters to support the browser search.
 
-Another new feature is enhanced character matching for non-english languages. 
-Diacritic characters which are considered as additional letters in the alphabet of a language can be added to configuration to have them indexed correctly for search. 
+Another new feature is enhanced character matching for non-english languages.
+Diacritic characters which are considered as additional letters in the alphabet of a language can be added to configuration to have them indexed correctly for search.
 For example the Swedish language uses the characters 'å', 'ä' and 'ö' as additional letters in their alphabet, these letters are not just accented versions of 'a' and 'o'.
-Thank you to Daniel Karlsson for educating us about this and providing an initial proof of concept. 
+Thank you to Daniel Karlsson for educating us about this and providing an initial proof of concept.
 
 Thank you to everyone who asked questions and provided feedback during another great release.
 
 _Note: The old public browser API project "sct-snapshot-rest-api" has now been archived in favour of the Snowstorm terminology server._
 
 ### Breaking
-- Description index mapping has been updated with better support for non-english languages. 
-Please migrate existing data to the new mapping using the [reindexing guide](docs/index-mapping-changes.md) then run 
+- Description index mapping has been updated with better support for non-english languages.
+Please migrate existing data to the new mapping using the [reindexing guide](docs/index-mapping-changes.md) then run
 the new admin "Rebuild the description index" function found in the swagger API docs.
 
 ### Features
@@ -118,7 +348,7 @@ the new admin "Rebuild the description index" function found in the swagger API 
 - Browser description search:
   - Faster aggregations.
   - New search parameters: active, semanticTag, module, conceptRefset.
-  - New options: group by concept. 
+  - New options: group by concept.
   - New search mode for regular expressions.
 - Browser:
   - Browser Concept JSON format made consistent with Snow Owl (minor changes made on both sides).
@@ -167,7 +397,7 @@ the new admin "Rebuild the description index" function found in the swagger API 
   - Use translated FSN and PT in concept browser response.
   - Fix concept search when combining ECL and definition status.
   - Concept search using concept id can now return inactive concepts.
-  - Fix active flag concept filter. 
+  - Fix active flag concept filter.
 - Version Control:
   - Fix branch rebase issue where multiple versions of a component could survive.   
   - Fix performance issue when promoting a large amount of changes to MAIN.

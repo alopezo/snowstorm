@@ -11,6 +11,7 @@ import org.snomed.snowstorm.core.data.domain.jobs.IdentifiersForRegistration;
 import org.snomed.snowstorm.core.data.repositories.jobs.IdentifiersForRegistrationRepository;
 import org.snomed.snowstorm.core.data.services.ServiceException;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
@@ -20,7 +21,7 @@ import java.util.regex.Pattern;
 @Service
 public class IdentifierService {
 	
-	private static final Pattern SCTID_PATTERN = Pattern.compile("\\d{6,18}");
+	public static final Pattern SCTID_PATTERN = Pattern.compile("\\d{6,18}");
 
 	private static final String PARTITION_PART1_INTERNATIONAL = "0";
 	private static final String PARTITION_PART1_EXTENSION = "1";
@@ -28,8 +29,9 @@ public class IdentifierService {
 	private static final String PARTITION_PART2_CONCEPT = "0";
 	private static final String PARTITION_PART2_DESCRIPTION = "1";
 	private static final String PARTITION_PART2_RELATIONSHIP = "2";
-	
-	private static boolean suspendRegistrationProcess = false;
+
+	@Value("${cis.registration.enabled}")
+	private boolean registrationEnabled;
 	
 	@Autowired
 	private IdentifierCacheManager cacheManager;
@@ -84,14 +86,14 @@ public class IdentifierService {
 
 	private IdentifierReservedBlock getReservedBlock(int namespace, int conceptIds, int descriptionIds, int relationshipIds) throws ServiceException {
 		String partition_part1 = namespace == 0 ? PARTITION_PART1_INTERNATIONAL : PARTITION_PART1_EXTENSION;
-		IdentifierReservedBlock idBlock = new IdentifierReservedBlock();
+		IdentifierReservedBlock idBlock = new IdentifierReservedBlock(namespace);
 		//TODO Run these in parallel
 		try {
 			cacheManager.populateIdBlock(idBlock, conceptIds, namespace, partition_part1 + PARTITION_PART2_CONCEPT);
 			cacheManager.populateIdBlock(idBlock, descriptionIds, namespace, partition_part1 + PARTITION_PART2_DESCRIPTION);
 			cacheManager.populateIdBlock(idBlock, relationshipIds, namespace, partition_part1 + PARTITION_PART2_RELATIONSHIP);
 		} catch (ServiceException e) {
-			throw new ServiceException ("Unable to obtain sctids", e);
+			throw new ServiceException ("Unable to obtain SCTIDs", e);
 		}
 		return idBlock;
 	}
@@ -100,25 +102,20 @@ public class IdentifierService {
 		for (ComponentType componentType : ComponentType.values()) {
 			Collection<Long> idsAssigned = reservedBlock.getIdsAssigned(componentType);
 			if (!idsAssigned.isEmpty()) {
-				identifiersForRegistrationRepository.save(new IdentifiersForRegistration(0, idsAssigned));
+				identifiersForRegistrationRepository.save(new IdentifiersForRegistration(reservedBlock.getNamespace(), idsAssigned));
 			}
 		}
 	}
 
 	@Scheduled(fixedDelay = 30_000)
 	public synchronized void registerIdentifiers() {
-		if (suspendRegistrationProcess) {
+		if (!registrationEnabled) {
+			logger.debug("SCTID Registration process disabled.");
 			return;
 		}
-		// Gather sets of identifiers and group by namespace
-		Map<Integer, Set<Long>> namespaceIdentifierMap = new HashMap<>();
-		//PageRequest pageRequest = PageRequest.of(0,1000);
+		// Gather sets of identifiers and group by namespace, then register
 		Iterable<IdentifiersForRegistration> roundOfIdentifiers = identifiersForRegistrationRepository.findAll();
-		for (IdentifiersForRegistration identifiersForRegistration : roundOfIdentifiers) {
-			namespaceIdentifierMap.computeIfAbsent(identifiersForRegistration.getNamespace(), (n) -> new HashSet<>())
-					.addAll(identifiersForRegistration.getIds());
-		}
-		// Register each group
+		Map<Integer, Set<Long>> namespaceIdentifierMap = getNamespaceIdentifierMap(roundOfIdentifiers);
 		try {
 			for (Map.Entry<Integer, Set<Long>> entry : namespaceIdentifierMap.entrySet()) {
 				Integer namespace = entry.getKey();
@@ -132,7 +129,19 @@ public class IdentifierService {
 		} 
 	}
 
-	public IdentifierReservedBlock reserveIdentifierBlock(Collection<Concept> concepts) throws ServiceException {
+	protected Map<Integer, Set<Long>> getNamespaceIdentifierMap(Iterable<IdentifiersForRegistration> roundOfIdentifiers) {
+		Map<Integer, Set<Long>> namespaceIdentifierMap = new HashMap<>();
+		for (IdentifiersForRegistration identifiersForRegistration : roundOfIdentifiers) {
+			namespaceIdentifierMap.computeIfAbsent(identifiersForRegistration.getNamespace(), (n) -> new HashSet<>())
+					.addAll(identifiersForRegistration.getIds());
+		}
+		return namespaceIdentifierMap;
+	}
+
+	public IdentifierReservedBlock reserveIdentifierBlock(Collection<Concept> concepts, String namespace) throws ServiceException {
+
+		int namespaceInt = Strings.isNullOrEmpty(namespace) ? 0 : Integer.parseInt(namespace);
+
 		//Work out how many new concept, description and relationship sctids we're going to need, and request these
 		int conceptIds = 0, descriptionIds = 0, relationshipIds = 0;
 		
@@ -154,13 +163,7 @@ public class IdentifierService {
 				}
 			}
 		}
-		int namespace = 0;
-		return getReservedBlock(namespace, conceptIds, descriptionIds, relationshipIds);
+		return getReservedBlock(namespaceInt, conceptIds, descriptionIds, relationshipIds);
 	}
 
-	public static void suspendRegistrationProcess(boolean suspend) {
-		logger.warn("SCTID Registration process " + (suspend ? " suspended" : "resumed"));
-		suspendRegistrationProcess = suspend;
-	}
-	
 }

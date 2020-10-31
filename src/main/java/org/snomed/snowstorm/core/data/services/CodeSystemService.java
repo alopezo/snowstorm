@@ -21,23 +21,31 @@ import org.snomed.snowstorm.core.data.repositories.CodeSystemRepository;
 import org.snomed.snowstorm.core.data.repositories.CodeSystemVersionRepository;
 import org.snomed.snowstorm.core.data.services.pojo.CodeSystemConfiguration;
 import org.snomed.snowstorm.core.data.services.pojo.PageWithBucketAggregationsFactory;
+import org.snomed.snowstorm.core.pojo.LanguageDialect;
+import org.snomed.snowstorm.core.util.DateUtil;
 import org.snomed.snowstorm.core.util.LangUtil;
 import org.snomed.snowstorm.rest.pojo.CodeSystemUpdateRequest;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.cache.annotation.Cacheable;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Sort;
 import org.springframework.data.elasticsearch.core.ElasticsearchOperations;
-import org.springframework.data.elasticsearch.core.aggregation.AggregatedPage;
+import org.springframework.data.elasticsearch.core.SearchHit;
+import org.springframework.data.elasticsearch.core.SearchHits;
 import org.springframework.data.elasticsearch.core.query.NativeSearchQuery;
 import org.springframework.data.elasticsearch.core.query.NativeSearchQueryBuilder;
 import org.springframework.data.util.Pair;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.stereotype.Service;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 
 import static io.kaicode.elasticvc.api.ComponentService.LARGE_PAGE;
+import static java.lang.String.format;
 import static org.elasticsearch.index.query.QueryBuilders.*;
 import static org.snomed.snowstorm.config.Config.DEFAULT_LANGUAGE_CODES;
 
@@ -60,6 +68,9 @@ public class CodeSystemService {
 	private BranchService branchService;
 
 	@Autowired
+	private SBranchService sBranchService;
+
+	@Autowired
 	private ReleaseService releaseService;
 
 	@Autowired
@@ -79,6 +90,9 @@ public class CodeSystemService {
 
 	@Autowired
 	private ModelMapper modelMapper;
+
+	@Value("${codesystem.all.latest-version.allow-future}")
+	private boolean latestVersionCanBeFuture;
 
 	// Cache to prevent expensive aggregations. Entry per branch. Expires if there is a new commit.
 	private final ConcurrentHashMap<String, Pair<Date, CodeSystem>> contentInformationCache = new ConcurrentHashMap<>();
@@ -100,48 +114,50 @@ public class CodeSystemService {
 		return findOneByBranchPath(branchPath) != null;
 	}
 
-	public synchronized void createCodeSystem(CodeSystem codeSystem) {
-		validatorService.validate(codeSystem);
-		if (repository.findById(codeSystem.getShortName()).isPresent()) {
+	public synchronized void createCodeSystem(CodeSystem newCodeSystem) {
+		validatorService.validate(newCodeSystem);
+		if (repository.findById(newCodeSystem.getShortName()).isPresent()) {
 			throw new IllegalArgumentException("A code system already exists with this short name.");
 		}
-		String branchPath = codeSystem.getBranchPath();
+		String branchPath = newCodeSystem.getBranchPath();
 		if (findByBranchPath(branchPath).isPresent()) {
 			throw new IllegalArgumentException("A code system already exists with this branch path.");
 		}
-		String parentPath = PathUtil.getParentPath(codeSystem.getBranchPath());
+		String parentPath = PathUtil.getParentPath(newCodeSystem.getBranchPath());
 		CodeSystem parentCodeSystem = null;
 		if (parentPath != null) {
-			Integer dependantVersion = codeSystem.getDependantVersion();
+			Integer dependantVersionEffectiveTime = newCodeSystem.getDependantVersionEffectiveTime();
 			parentCodeSystem = findByBranchPath(parentPath).orElse(null);
-			if (dependantVersion != null) {
+			if (dependantVersionEffectiveTime != null) {
 				// Check dependant version exists on parent path
 				if (parentCodeSystem != null) {
-					if (findVersion(parentCodeSystem.getShortName(), dependantVersion) == null) {
-						throw new IllegalArgumentException(String.format("No code system version found matching dependantVersion '%s' on the parent branch path '%s'.", dependantVersion, parentPath));
+					if (findVersion(parentCodeSystem.getShortName(), dependantVersionEffectiveTime) == null) {
+						throw new IllegalArgumentException(format("No code system version found matching dependantVersion '%s' on the parent branch path '%s'.",
+								dependantVersionEffectiveTime, parentPath));
 					}
 				} else {
-					throw new IllegalArgumentException(String.format("No code system found on the parent branch path '%s' so dependantVersion property is not required.", parentPath));
+					throw new IllegalArgumentException(format("No code system found on the parent branch path '%s' so dependantVersion property is not required.",
+							parentPath));
 				}
 			} else if (parentCodeSystem != null) {
 				// Find latest version on parent path
-				CodeSystemVersion latestVersion = findLatestVersion(parentCodeSystem.getShortName());
+				CodeSystemVersion latestVersion = findLatestImportedVersion(parentCodeSystem.getShortName());
 				if (latestVersion != null) {
-					codeSystem.setDependantVersion(latestVersion.getEffectiveDate());
+					newCodeSystem.setDependantVersionEffectiveTime(latestVersion.getEffectiveDate());
 				}
 			}
 		}
-		Integer dependantVersion = codeSystem.getDependantVersion();
+		Integer dependantVersionEffectiveTime = newCodeSystem.getDependantVersionEffectiveTime();
 		boolean branchExists = branchService.exists(branchPath);
-		if (parentCodeSystem != null && dependantVersion != null) {
+		if (parentCodeSystem != null && dependantVersionEffectiveTime != null) {
 			if (branchExists) {
-				throw new IllegalStateException(String.format("Unable to create code system branch with correct base timepoint because branch '%s' already exists!", branchPath));
+				throw new IllegalStateException(format("Unable to create code system branch with correct base timepoint because branch '%s' already exists!", branchPath));
 			}
 			// Create branch with base timepoint matching dependant version branch base timepoint
-			String releaseBranchPath = getReleaseBranchPath(parentCodeSystem.getBranchPath(), dependantVersion);
+			String releaseBranchPath = getReleaseBranchPath(parentCodeSystem.getBranchPath(), dependantVersionEffectiveTime);
 			Branch dependantVersionBranch = branchService.findLatest(releaseBranchPath);
 			if (dependantVersionBranch == null) {
-				throw new IllegalStateException(String.format("Dependant version branch '%s' is missing.", releaseBranchPath));
+				throw new IllegalStateException(format("Dependant version branch '%s' is missing.", releaseBranchPath));
 			}
 			branchService.createAtBaseTimepoint(branchPath, dependantVersionBranch.getBase());
 
@@ -149,20 +165,38 @@ public class CodeSystemService {
 			logger.info("Creating Code System branch '{}'.", branchPath);
 			branchService.create(branchPath);
 		}
-		repository.save(codeSystem);
-		logger.info("Code System '{}' created.", codeSystem.getShortName());
+		repository.save(newCodeSystem);
+		logger.info("Code System '{}' created.", newCodeSystem.getShortName());
 	}
 
-	private Optional<CodeSystem> findByBranchPath(String branchPath) {
-		List<CodeSystem> codeSystems = elasticsearchOperations.queryForList(
+	public Optional<CodeSystem> findByBranchPath(String branchPath) {
+		List<CodeSystem> codeSystems = elasticsearchOperations.search(
 				new NativeSearchQueryBuilder()
 						.withQuery(boolQuery().must(termsQuery(CodeSystem.Fields.BRANCH_PATH, branchPath)))
-						.build(),
-				CodeSystem.class);
+						.build(), CodeSystem.class)
+				.stream()
+				.map(SearchHit::getContent)
+				.collect(Collectors.toList());
 
 		return codeSystems.isEmpty() ? Optional.empty() : Optional.of(codeSystems.get(0));
 	}
 
+	public CodeSystem findClosestCodeSystemUsingAnyBranch(String branchPath, boolean includeContentInformation) {
+		do {
+			Optional<CodeSystem> codeSystemOptional = findByBranchPath(branchPath);
+			if (codeSystemOptional.isPresent()) {
+				CodeSystem codeSystem = codeSystemOptional.get();
+				if(includeContentInformation) {
+					joinContentInformation(Collections.singletonList(codeSystem));
+				}
+				return codeSystem;
+			}
+			branchPath = PathUtil.getParentPath(branchPath);
+		} while (branchPath != null);
+		return null;
+	}
+
+	@PreAuthorize("hasPermission('ADMIN', #codeSystem.branchPath)")
 	public synchronized String createVersion(CodeSystem codeSystem, Integer effectiveDate, String description) {
 
 		if (effectiveDate == null || effectiveDate.toString().length() != 8) {
@@ -203,10 +237,11 @@ public class CodeSystemService {
 	}
 
 	public synchronized void createVersionIfCodeSystemFoundOnPath(String branchPath, Integer releaseDate) {
-		List<CodeSystem> codeSystems = elasticsearchOperations.queryForList(new NativeSearchQuery(termQuery(CodeSystem.Fields.BRANCH_PATH, branchPath)), CodeSystem.class);
+		List<CodeSystem> codeSystems = elasticsearchOperations.search(new NativeSearchQuery(termQuery(CodeSystem.Fields.BRANCH_PATH, branchPath)), CodeSystem.class)
+				.get().map(SearchHit::getContent).collect(Collectors.toList());
 		if (!codeSystems.isEmpty()) {
 			CodeSystem codeSystem = codeSystems.get(0);
-			createVersion(codeSystem, releaseDate, String.format("%s %s import.", codeSystem.getShortName(), releaseDate));
+			createVersion(codeSystem, releaseDate, format("%s %s import.", codeSystem.getShortName(), releaseDate));
 		}
 	}
 
@@ -216,6 +251,11 @@ public class CodeSystemService {
 		return codeSystems;
 	}
 
+	@Cacheable("code-system-branches")
+	public List<String> findAllCodeSystemBranchesUsingCache() {
+		return repository.findAll(PageRequest.of(0, 1000, Sort.by(CodeSystem.Fields.SHORT_NAME))).getContent().stream().map(CodeSystem::getBranchPath).sorted().collect(Collectors.toList());
+	}
+
 	private void joinContentInformation(List<CodeSystem> codeSystems) {
 		for (CodeSystem codeSystem : codeSystems) {
 			String branchPath = codeSystem.getBranchPath();
@@ -223,19 +263,14 @@ public class CodeSystemService {
 			Branch latestBranch = branchService.findLatest(branchPath);
 			if (latestBranch == null) continue;
 
-			// Lookup latest version
-			List<CodeSystemVersion> versions = versionRepository.findByShortNameOrderByEffectiveDateDesc(codeSystem.getShortName(), LARGE_PAGE).getContent();
-			if (!versions.isEmpty()) {
-				codeSystem.setLatestVersion(versions.get(0));
-			}
+			// Lookup latest version with an effective date equal or less than today
+			codeSystem.setLatestVersion(findLatestVisibleVersion(codeSystem.getShortName()));
 
 			// Pull from cache
 			Pair<Date, CodeSystem> dateCodeSystemPair = contentInformationCache.get(branchPath);
 			if (dateCodeSystemPair != null) {
 				if (dateCodeSystemPair.getFirst().equals(latestBranch.getHead())) {
-					CodeSystem cachedCodeSystem = dateCodeSystemPair.getSecond();
-					codeSystem.setLanguages(cachedCodeSystem.getLanguages());
-					codeSystem.setModules(cachedCodeSystem.getModules());
+					copyDetailsFromCacheEntry(codeSystem, dateCodeSystemPair);
 					continue;
 				} else {
 					// Remove expired cache entry
@@ -243,64 +278,124 @@ public class CodeSystemService {
 				}
 			}
 
-			BranchCriteria branchCriteria = versionControlHelper.getBranchCriteria(branchPath);
-
-			List<String> acceptableLanguageCodes = new ArrayList<>(DEFAULT_LANGUAGE_CODES);
-
-			// Add list of languages using Description aggregation
-			AggregatedPage<Description> descriptionPage = (AggregatedPage<Description>) elasticsearchOperations.queryForPage(new NativeSearchQueryBuilder()
-					.withQuery(boolQuery()
-							.must(branchCriteria.getEntityBranchCriteria(Description.class))
-							.must(termQuery(Description.Fields.ACTIVE, true)))
-					.withPageable(PageRequest.of(0, 1))
-					.addAggregation(AggregationBuilders.terms("language").field(Description.Fields.LANGUAGE_CODE))
-					.build(), Description.class);
-			if (descriptionPage.hasContent()) {
-				// Collect other languages for concept mini lookup
-				List<? extends Terms.Bucket> language = ((ParsedStringTerms) descriptionPage.getAggregation("language")).getBuckets();
-				List<String> languageCodesSorted = language.stream()
-						// sort by number of active descriptions in each language
-						.sorted(Comparator.comparing(MultiBucketsAggregation.Bucket::getDocCount).reversed())
-						.map(MultiBucketsAggregation.Bucket::getKeyAsString)
-						.collect(Collectors.toList());
-
-				// Push english to the bottom to show any translated content first in browsers.
-				languageCodesSorted.remove("en");
-				languageCodesSorted.add("en");
-
-				// Pull default language code to top if any specified
-				String defaultLanguageCode = codeSystem.getDefaultLanguageCode();
-				if (languageCodesSorted.contains(defaultLanguageCode)) {
-					languageCodesSorted.remove(defaultLanguageCode);
-					languageCodesSorted.add(0, defaultLanguageCode);
-				}
-
-				acceptableLanguageCodes = languageCodesSorted;
-
-				Map<String, String> langs = new LinkedHashMap<>();
-				for (String languageCode : languageCodesSorted) {
-					langs.put(languageCode, LangUtil.convertLanguageCodeToName(languageCode));
-				}
-				codeSystem.setLanguages(langs);
-			}
-
-			// Add list of modules using refset member aggregation
-			AggregatedPage<ReferenceSetMember> memberPage = (AggregatedPage<ReferenceSetMember>) elasticsearchOperations.queryForPage(new NativeSearchQueryBuilder()
-					.withQuery(boolQuery()
-							.must(branchCriteria.getEntityBranchCriteria(ReferenceSetMember.class))
-							.must(termQuery(ReferenceSetMember.Fields.ACTIVE, true)))
-					.withPageable(PageRequest.of(0, 1))
-					.addAggregation(AggregationBuilders.terms("module").field(ReferenceSetMember.Fields.MODULE_ID))
-					.build(), ReferenceSetMember.class);
-			if (memberPage.hasContent()) {
-				Map<String, Long> modulesOfActiveMembers = PageWithBucketAggregationsFactory.createPage(memberPage, memberPage.getAggregations().asList())
-						.getBuckets().get("module");
-				codeSystem.setModules(conceptService.findConceptMinis(branchCriteria, modulesOfActiveMembers.keySet(), acceptableLanguageCodes).getResultsMap().values());
-			}
-
-			// Add to cache
-			contentInformationCache.put(branchPath, Pair.of(latestBranch.getHead(), codeSystem));
+			doJoinContentInformation(codeSystem, branchPath, latestBranch);
 		}
+	}
+
+	private void copyDetailsFromCacheEntry(CodeSystem codeSystem, Pair<Date, CodeSystem> cachEntry) {
+		CodeSystem cachedCodeSystem = cachEntry.getSecond();
+		codeSystem.setLanguages(cachedCodeSystem.getLanguages());
+		codeSystem.setModules(cachedCodeSystem.getModules());
+		codeSystem.setDependantVersionEffectiveTime(cachedCodeSystem.getDependantVersionEffectiveTime());
+	}
+
+	private synchronized void doJoinContentInformation(CodeSystem codeSystem, String branchPath, Branch latestBranch) {
+
+		// Pull from cache again in case this just ran in a different thread
+		Pair<Date, CodeSystem> dateCodeSystemPair = contentInformationCache.get(branchPath);
+		if (dateCodeSystemPair != null) {
+			copyDetailsFromCacheEntry(codeSystem, dateCodeSystemPair);
+			return;
+		}
+
+		// Set dependant version effectiveTime (transient field)
+		setDependantVersionEffectiveTime(codeSystem, branchPath, latestBranch);
+
+		BranchCriteria branchCriteria = versionControlHelper.getBranchCriteria(latestBranch);
+
+		List<String> acceptableLanguageCodes = new ArrayList<>(DEFAULT_LANGUAGE_CODES);
+
+		// Add list of languages using Description aggregation
+		SearchHits<Description> descriptionSearch = elasticsearchOperations.search(new NativeSearchQueryBuilder()
+				.withQuery(boolQuery()
+						.must(branchCriteria.getEntityBranchCriteria(Description.class))
+						.must(termQuery(Description.Fields.ACTIVE, true)))
+				.withPageable(PageRequest.of(0, 1))
+				.addAggregation(AggregationBuilders.terms("language").field(Description.Fields.LANGUAGE_CODE))
+				.build(), Description.class);
+		if (descriptionSearch.hasAggregations()) {
+			// Collect other languages for concept mini lookup
+			List<? extends Terms.Bucket> language = ((ParsedStringTerms) descriptionSearch.getAggregations().get("language")).getBuckets();
+			List<String> languageCodesSorted = language.stream()
+					// sort by number of active descriptions in each language
+					.sorted(Comparator.comparing(MultiBucketsAggregation.Bucket::getDocCount).reversed())
+					.map(MultiBucketsAggregation.Bucket::getKeyAsString)
+					.collect(Collectors.toList());
+
+			// Push english to the bottom to show any translated content first in browsers.
+			languageCodesSorted.remove("en");
+			languageCodesSorted.add("en");
+
+			// Pull default language code to top if any specified
+			String defaultLanguageCode = codeSystem.getDefaultLanguageCode();
+			if (languageCodesSorted.contains(defaultLanguageCode)) {
+				languageCodesSorted.remove(defaultLanguageCode);
+				languageCodesSorted.add(0, defaultLanguageCode);
+			}
+
+			acceptableLanguageCodes = languageCodesSorted;
+
+			Map<String, String> langs = new LinkedHashMap<>();
+			for (String languageCode : languageCodesSorted) {
+				langs.put(languageCode, LangUtil.convertLanguageCodeToName(languageCode));
+			}
+			codeSystem.setLanguages(langs);
+		}
+
+		// Add list of modules using refset member aggregation
+		SearchHits<ReferenceSetMember> memberPage = elasticsearchOperations.search(new NativeSearchQueryBuilder()
+				.withQuery(boolQuery()
+						.must(branchCriteria.getEntityBranchCriteria(ReferenceSetMember.class))
+						.must(termQuery(ReferenceSetMember.Fields.ACTIVE, true)))
+				.withPageable(PageRequest.of(0, 1))
+				.addAggregation(AggregationBuilders.terms("module").field(ReferenceSetMember.Fields.MODULE_ID))
+				.build(), ReferenceSetMember.class);
+		if (memberPage.hasAggregations()) {
+			Map<String, Long> modulesOfActiveMembers = PageWithBucketAggregationsFactory.createPage(memberPage, PageRequest.of(0, 1))
+					.getBuckets().get("module");
+			List<LanguageDialect> languageDialects = acceptableLanguageCodes.stream().map(LanguageDialect::new).collect(Collectors.toList());
+			codeSystem.setModules(conceptService.findConceptMinis(branchCriteria, modulesOfActiveMembers.keySet(), languageDialects).getResultsMap().values());
+		}
+
+		// Add to cache
+		contentInformationCache.put(branchPath, Pair.of(latestBranch.getHead(), codeSystem));
+	}
+
+	private void setDependantVersionEffectiveTime(CodeSystem codeSystem, String branchPath, Branch latestBranch) {
+		String parentPath = PathUtil.getParentPath(branchPath);
+		if (parentPath != null) {
+			CodeSystem parentCodeSystem = findByBranchPath(parentPath).orElse(null);
+			if (parentCodeSystem == null) {
+				logger.error("Parent branch should contain a Code System {}", branchPath);
+				return;
+			}
+
+			List<CodeSystemVersion> allParentVersions = findAllVersions(parentCodeSystem.getShortName(), true);
+			if (allParentVersions.isEmpty()) {
+				logger.error("Code System {} has a child Code System {} but does not have any versions.", parentCodeSystem, codeSystem);
+				return;
+			}
+			Map<String, CodeSystemVersion> pathToVersionMap = allParentVersions.stream().collect(Collectors.toMap(CodeSystemVersion::getBranchPath, Function.identity()));
+			Date codeSystemBranchBase = latestBranch.getBase();
+			List<Branch> parentVersionBranchMatchingCodeSystemBase = sBranchService.findByPathAndBaseTimepoint(pathToVersionMap.keySet(), codeSystemBranchBase);
+			if (parentVersionBranchMatchingCodeSystemBase.isEmpty()) {
+				logger.warn("Code System {} is not dependant on a specific version of the parent Code System {}. " +
+						"The main branch {} has a base timepoint of {} which does not match the base of any version branches of {}.",
+						codeSystem, parentCodeSystem, branchPath, codeSystemBranchBase.getTime(), parentCodeSystem);
+				return;
+			}
+			Branch parentCodeSystemVersionBranch = parentVersionBranchMatchingCodeSystemBase.iterator().next();
+			CodeSystemVersion parentCodeSystemVersion = pathToVersionMap.get(parentCodeSystemVersionBranch.getPath());
+			codeSystem.setDependantVersionEffectiveTime(parentCodeSystemVersion.getEffectiveDate());
+		}
+	}
+
+	public CodeSystem findOrThrow(String codeSystemShortName) {
+		CodeSystem codeSystem = find(codeSystemShortName);
+		if (codeSystem == null) {
+			throw new NotFoundException(String.format("Code System with short name '%s' does not exist.", codeSystemShortName));
+		}
+		return codeSystem;
 	}
 
 	public CodeSystem find(String codeSystemShortName) {
@@ -321,21 +416,35 @@ public class CodeSystemService {
 		return versionRepository.findOneByShortNameAndEffectiveDate(shortName, effectiveTime);
 	}
 
-	public List<CodeSystemVersion> findAllVersions(String shortName) {
-		return findAllVersions(shortName, true);
+	public List<CodeSystemVersion> findAllVersions(String shortName, Boolean showFutureVersions) {
+		return findAllVersions(shortName, true, showFutureVersions);
 	}
 
-	public List<CodeSystemVersion> findAllVersions(String shortName, boolean ascOrder) {
+	private List<CodeSystemVersion> findAllVersions(String shortName, boolean ascOrder, Boolean showFutureVersions) {
+		List<CodeSystemVersion> content;
 		if (ascOrder) {
-			return versionRepository.findByShortNameOrderByEffectiveDate(shortName, LARGE_PAGE).getContent();
+			content = versionRepository.findByShortNameOrderByEffectiveDate(shortName, LARGE_PAGE).getContent();
 		} else {
-			return versionRepository.findByShortNameOrderByEffectiveDateDesc(shortName, LARGE_PAGE).getContent();
+			content = versionRepository.findByShortNameOrderByEffectiveDateDesc(shortName, LARGE_PAGE).getContent();
+		}
+		if (showFutureVersions != null && showFutureVersions) {
+			return content;
+		} else {
+			int todaysEffectiveTime = DateUtil.getTodaysEffectiveTime();
+			return content.stream().filter(version -> version.getEffectiveDate() <= todaysEffectiveTime).collect(Collectors.toList());
 		}
 	}
 
-	public CodeSystemVersion findLatestVersion(String shortName) {
-		//return versionRepository.findTopByShortNameOrderByEffectiveDateDesc(shortName);
-		List<CodeSystemVersion> versions = findAllVersions(shortName, false);
+	public CodeSystemVersion findLatestImportedVersion(String shortName) {
+		List<CodeSystemVersion> versions = findAllVersions(shortName, false, true);
+		if (versions != null && versions.size() > 0) {
+			return versions.get(0);
+		}
+		return null;
+	}
+
+	public CodeSystemVersion findLatestVisibleVersion(String shortName) {
+		List<CodeSystemVersion> versions = findAllVersions(shortName, false, latestVersionCanBeFuture);
 		if (versions != null && versions.size() > 0) {
 			return versions.get(0);
 		}
@@ -347,32 +456,8 @@ public class CodeSystemService {
 		versionRepository.deleteAll();
 	}
 
-	public void upgrade(String shortName, Integer newDependantVersion) {
-		CodeSystem codeSystem = find(shortName);
-		if (codeSystem == null) {
-			throw new NotFoundException(String.format("Code System with short name '%s' does not exist.", shortName));
-		}
-		String branchPath = codeSystem.getBranchPath();
-		String parentPath = PathUtil.getParentPath(branchPath);
-		if (parentPath == null) {
-			throw new IllegalArgumentException("The root Code System can not be upgraded.");
-		}
-		CodeSystem parentCodeSystem = findOneByBranchPath(parentPath);
-		if (parentCodeSystem == null) {
-			throw new IllegalStateException(String.format("The Code System to be upgraded must be on a branch which is the direct child of another Code System. " +
-					"There is no Code System on parent branch '%s'.", parentPath));
-		}
-		CodeSystemVersion newParentVersion = findVersion(parentCodeSystem.getShortName(), newDependantVersion);
-		if (newParentVersion == null) {
-			throw new IllegalArgumentException(String.format("Parent Code System %s has no version with effectiveTime '%s'.", parentCodeSystem.getShortName(), newDependantVersion));
-		}
-
-		Branch newParentVersionBranch = branchService.findLatest(newParentVersion.getBranchPath());
-		Date newParentBaseTimepoint = newParentVersionBranch.getBase();
-		branchMergeService.rebaseToSpecificTimepointAndRemoveDuplicateContent(parentPath, newParentBaseTimepoint, branchPath, String.format("Upgrading extension to %s@%s.", parentPath, newParentVersion.getVersion()));
-	}
-
 	@Deprecated// Deprecated in favour of upgrade operation.
+	@PreAuthorize("hasPermission('ADMIN', #codeSystem.branchPath)")
 	public void migrateDependantCodeSystemVersion(CodeSystem codeSystem, String dependantCodeSystem, Integer newDependantVersion, boolean copyMetadata) throws ServiceException {
 		try {
 			CodeSystemVersion newDependantCodeSystemVersion = versionRepository.findOneByShortNameAndEffectiveDate(dependantCodeSystem, newDependantVersion);
@@ -408,17 +493,36 @@ public class CodeSystemService {
 		}
 	}
 
-	private CodeSystem findOneByBranchPath(String path) {
-		List<CodeSystem> results = elasticsearchOperations.queryForList(
-				new NativeSearchQueryBuilder().withQuery(termQuery(CodeSystem.Fields.BRANCH_PATH, path)).build(), CodeSystem.class);
+	CodeSystem findOneByBranchPath(String path) {
+		List<CodeSystem> results = elasticsearchOperations.search(
+				new NativeSearchQueryBuilder().withQuery(termQuery(CodeSystem.Fields.BRANCH_PATH, path)).build(), CodeSystem.class)
+				.get().map(SearchHit::getContent).collect(Collectors.toList());
 		return results.isEmpty() ? null : results.get(0);
 	}
 
+	@PreAuthorize("hasPermission('ADMIN', #codeSystem.branchPath)")
 	public CodeSystem update(CodeSystem codeSystem, CodeSystemUpdateRequest updateRequest) {
 		modelMapper.map(updateRequest, codeSystem);
 		validatorService.validate(codeSystem);
 		repository.save(codeSystem);
 		contentInformationCache.remove(codeSystem.getBranchPath());
 		return codeSystem;
+	}
+
+	@PreAuthorize("hasPermission('ADMIN', #codeSystem.branchPath)")
+	public void deleteCodeSystemAndVersions(CodeSystem codeSystem) {
+		if (codeSystem.getBranchPath().equals("MAIN")) {
+			throw new IllegalArgumentException("The root code system can not be deleted. " +
+					"If you need to start again delete all indices and restart Snowstorm.");
+		}
+		logger.info("Deleting Code System '{}'.", codeSystem.getShortName());
+		List<CodeSystemVersion> allVersions = findAllVersions(codeSystem.getShortName(), true);
+		versionRepository.deleteAll(allVersions);
+		repository.delete(codeSystem);
+		logger.info("Deleted Code System '{}' and versions.", codeSystem.getShortName());
+	}
+
+	protected void setLatestVersionCanBeFuture(boolean latestVersionCanBeFuture) {
+		this.latestVersionCanBeFuture = latestVersionCanBeFuture;
 	}
 }

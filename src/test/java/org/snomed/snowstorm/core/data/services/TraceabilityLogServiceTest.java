@@ -2,10 +2,10 @@ package org.snomed.snowstorm.core.data.services;
 
 import io.kaicode.elasticvc.domain.Branch;
 import io.kaicode.elasticvc.domain.Commit;
-import org.junit.After;
-import org.junit.Before;
-import org.junit.Test;
-import org.junit.runner.RunWith;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.snomed.snowstorm.AbstractTest;
 import org.snomed.snowstorm.TestConfig;
 import org.snomed.snowstorm.core.data.domain.Concept;
@@ -16,17 +16,20 @@ import org.snomed.snowstorm.core.data.services.traceability.Activity;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jms.annotation.JmsListener;
 import org.springframework.test.context.ContextConfiguration;
-import org.springframework.test.context.junit4.SpringJUnit4ClassRunner;
+import org.springframework.test.context.junit.jupiter.SpringExtension;
 
 import java.util.Collections;
+import java.util.Map;
+import java.util.Set;
 import java.util.Stack;
 
 import static junit.framework.TestCase.assertNull;
-import static org.junit.Assert.*;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
 
-@RunWith(SpringJUnit4ClassRunner.class)
+@ExtendWith(SpringExtension.class)
 @ContextConfiguration(classes = TestConfig.class)
-public class TraceabilityLogServiceTest extends AbstractTest {
+class TraceabilityLogServiceTest extends AbstractTest {
 
 	@Autowired
 	private TraceabilityLogService traceabilityLogService;
@@ -38,27 +41,27 @@ public class TraceabilityLogServiceTest extends AbstractTest {
 
 	private boolean testContextTraceabilityEnabled;
 
-	@Before
-	public void setup() {
+	@BeforeEach
+	void setup() {
 		testContextTraceabilityEnabled = traceabilityLogService.isEnabled();
 		// Temporarily enable traceability if not already enabled in the test context
 		traceabilityLogService.setEnabled(true);
 	}
 
-	@After
-	public void tearDown() {
+	@AfterEach
+	void tearDown() {
 		// Restore test context traceability switch
 		traceabilityLogService.setEnabled(testContextTraceabilityEnabled);
 	}
 
 	@JmsListener(destination = "${jms.queue.prefix}.traceability")
-	public void messageConsumer(Activity activity) {
+	void messageConsumer(Activity activity) {
 		System.out.println("Got activity " + activity.getCommitComment());
 		activitiesLogged.push(activity);
 	}
 
 	@Test
-	public void createDeleteConcept() throws ServiceException, InterruptedException {
+	void createDeleteConcept() throws ServiceException, InterruptedException {
 		Concept concept = conceptService.create(new Concept().addFSN("New concept"), MAIN);
 
 		Activity activity = getActivity();
@@ -76,7 +79,14 @@ public class TraceabilityLogServiceTest extends AbstractTest {
 		conceptService.update(concept, MAIN);
 		activity = getActivity();
 		assertEquals("Updating concept New concept", activity.getCommitComment());
-		assertEquals(1, activity.getChanges().size());
+		Map<String, Activity.ConceptActivity> changes = activity.getChanges();
+		assertEquals(1, changes.size());
+		Activity.ConceptActivity conceptActivity = changes.get(concept.getConceptId());
+		Set<Activity.ComponentChange> conceptChanges = conceptActivity.getChanges();
+		assertEquals(1, conceptChanges.size());
+		Activity.ComponentChange axiomChange = conceptChanges.iterator().next();
+		assertEquals("OWLAxiom", axiomChange.getComponentType());
+		assertEquals(concept.getClassAxioms().iterator().next().getAxiomId(), axiomChange.getComponentId());
 
 		// Add inferred relationship
 		concept.addRelationship(new Relationship(Concepts.ISA, Concepts.CLINICAL_FINDING).setInferred(true));
@@ -114,14 +124,14 @@ public class TraceabilityLogServiceTest extends AbstractTest {
 	}
 
 	@Test
-	public void createCommitCommentRebase() {
+	void createCommitCommentRebase() {
 		Commit commit = new Commit(new Branch("MAIN/A"), Commit.CommitType.REBASE, null, null);
 		commit.setSourceBranchPath("MAIN");
 		assertEquals("kkewley performed merge of MAIN to MAIN/A", traceabilityLogService.createCommitComment("kkewley", commit, Collections.emptySet(), false));
 	}
 
 	@Test
-	public void createCommitCommentPromotion() {
+	void createCommitCommentPromotion() {
 		Commit commit = new Commit(new Branch("MAIN"), Commit.CommitType.PROMOTION, null, null);
 		commit.setSourceBranchPath("MAIN/A");
 		assertEquals("kkewley performed merge of MAIN/A to MAIN", traceabilityLogService.createCommitComment("kkewley", commit, Collections.emptySet(), false));

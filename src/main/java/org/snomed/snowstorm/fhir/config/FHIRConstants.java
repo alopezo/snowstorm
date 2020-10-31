@@ -25,13 +25,22 @@ public interface FHIRConstants {
 	String NAME = "name";
 	String PROPERTY = "property";
 	StringType PARENT = new StringType("parent");
+	
+	String ACCEPT_LANGUAGE_HEADER = "Accept-Language";
+	int MAX_LANGUAGE_CODE_LENGTH = 5;
+	String PIPE = "\\|";
 
 	String SNOMED_EDITION = "SNOMED CT International Edition";
 	String SNOMED_INTERNATIONAL = "SNOMED International";
 	String SNOMED_URI = "http://snomed.info/sct";
+	String VERSION = "/version/";
+	String SNOMED_URI_DEFAULT_MODULE = "http://snomed.info/sct/900000000000207008";
 	String ICD10 = "ICD-10";
 	String ICD10_URI = "http://hl7.org/fhir/sid/icd-10";
-	String SNOMED_CONCEPTMAP = SNOMED_URI + "?fhir_cm=";
+	String ICDO = "ICD-O";
+	String ICDO_URI = "http://hl7.org/fhir/sid/icd-o";
+	String MAP_INDICATOR = "?fhir_cm=";
+	//String SNOMED_CONCEPTMAP = SNOMED_URI + MAP_INDICATOR;
 	
 	enum Validation { EQUALS, STARTS_WITH }
 	
@@ -41,7 +50,6 @@ public interface FHIRConstants {
 	String VALUE = "value";
 	String VALUE_BOOLEAN = "valueBoolean";
 	String VALUE_STRING = "valueString";
-	String VERSION = "version";
 	
 	String IMPLICIT_ISA = "?fhir_vs=isa/";
 	String IMPLICIT_REFSET = "?fhir_vs=refset/";
@@ -52,7 +60,8 @@ public interface FHIRConstants {
 		SUFFICIENTLY_DEFINED("sufficientlyDefined"),
 		MODULE_ID("moduleId"),
 		NORMAL_FORM("normalForm"),
-		NORMAL_FORM_TERSE("normalFormTerse");
+		NORMAL_FORM_TERSE("normalFormTerse"),
+		ALL_PROPERTIES("*");
 
 		private final String name;
 

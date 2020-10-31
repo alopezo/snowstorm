@@ -3,11 +3,9 @@ package org.snomed.snowstorm.core.data.repositories;
 import org.snomed.snowstorm.core.data.domain.CodeSystemVersion;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
-import org.springframework.data.elasticsearch.repository.ElasticsearchCrudRepository;
+import org.springframework.data.elasticsearch.repository.ElasticsearchRepository;
 
-import java.util.List;
-
-public interface CodeSystemVersionRepository extends ElasticsearchCrudRepository<CodeSystemVersion, String> {
+public interface CodeSystemVersionRepository extends ElasticsearchRepository<CodeSystemVersion, String> {
 
 	Page<CodeSystemVersion> findByShortNameOrderByEffectiveDate(String shortName, Pageable pageRequest);
 

@@ -14,17 +14,21 @@ Elasticsearch will work best with another 4G of memory left free on the server f
 
 ## Setup
 ### Install Elasticsearch
-Download and install [Elasticsearch **6.x**](https://www.elastic.co/downloads/past-releases/elasticsearch-6-5-4) (tested against 6.5.4).
+Download and install [Elasticsearch version 7](https://www.elastic.co/downloads/past-releases/elasticsearch-7-7-0) (tested against 7.7.0). 
 
 Update the configuration file _config/jvm.options_ with the memory options `-Xms4g` and `-Xmx4g`.
 
-### Build Snowstorm
-Build Snowstorm using maven:
+### Get Snowstorm Application Jar
+Download the latest release jar from the [releases page](https://github.com/IHTSDO/snowstorm/releases).
+
+**Or** build Snowstorm from the source code. 
+Docker must be running for the unit tests, they use an Elasticsearch container.
+
+Then use maven:
 ```bash
 mvn clean package
 ```
-
-**Or** download the most latest released jar from [the repository releases](https://github.com/IHTSDO/snowstorm/releases).
+Maven creates the jar file in the 'target' directory.
 
 
 ## Start Snowstorm
@@ -38,5 +42,5 @@ On the first run of Snowstorm the SNOMED CT data may need to be loaded. [Follow 
 
 On subsequent runs just start Snowstorm (in read only mode).
 ```bash
-java -Xms2g -Xmx2g -jar target/snowstorm*.jar --snowstorm.rest-api.readonly=true
+java -Xms2g -Xmx4g -jar target/snowstorm*.jar --snowstorm.rest-api.readonly=true
 ```

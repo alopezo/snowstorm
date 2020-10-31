@@ -1,8 +1,12 @@
 package org.snomed.snowstorm.core.data.services;
 
+import com.google.common.collect.Iterables;
 import io.kaicode.elasticvc.api.BranchCriteria;
+import io.kaicode.elasticvc.api.BranchService;
 import io.kaicode.elasticvc.api.ComponentService;
 import io.kaicode.elasticvc.api.VersionControlHelper;
+import io.kaicode.elasticvc.domain.Commit;
+import io.kaicode.rest.util.branchpathrewrite.BranchPathUriUtil;
 import it.unimi.dsi.fastutil.longs.LongArrayList;
 import it.unimi.dsi.fastutil.longs.LongArraySet;
 import it.unimi.dsi.fastutil.longs.LongComparators;
@@ -11,17 +15,18 @@ import org.snomed.snowstorm.core.data.domain.Concepts;
 import org.snomed.snowstorm.core.data.domain.Relationship;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.elasticsearch.core.ElasticsearchOperations;
+import org.springframework.data.elasticsearch.core.SearchHit;
+import org.springframework.data.elasticsearch.core.SearchHits;
+import org.springframework.data.elasticsearch.core.SearchHitsIterator;
 import org.springframework.data.elasticsearch.core.query.NativeSearchQuery;
 import org.springframework.data.elasticsearch.core.query.NativeSearchQueryBuilder;
-import org.springframework.data.util.CloseableIterator;
 import org.springframework.stereotype.Service;
 
-import java.util.Collection;
-import java.util.Collections;
-import java.util.List;
-import java.util.Set;
+import java.util.*;
+import java.util.stream.Collectors;
 
 import static java.lang.Long.parseLong;
 import static org.elasticsearch.index.query.QueryBuilders.*;
@@ -34,6 +39,12 @@ public class RelationshipService extends ComponentService {
 
 	@Autowired
 	private VersionControlHelper versionControlHelper;
+
+	@Autowired
+	private BranchService branchService;
+
+	@Autowired
+	private ConceptUpdateHelper conceptUpdateHelper;
 
 	public Relationship findRelationship(String branchPath, String relationshipId) {
 		Page<Relationship> relationships = findRelationships(branchPath, relationshipId, null, null, null, null, null, null, null, null, PageRequest.of(0, 1));
@@ -90,11 +101,26 @@ public class RelationshipService extends ComponentService {
 			query.must(termQuery(Relationship.Fields.CHARACTERISTIC_TYPE_ID, characteristicType.getConceptId()));
 		}
 
-		NativeSearchQueryBuilder queryBuilder = new NativeSearchQueryBuilder()
+		NativeSearchQuery searchQuery = new NativeSearchQueryBuilder()
 				.withQuery(query)
-				.withPageable(page);
+				.withPageable(page)
+				.build();
+		searchQuery.setTrackTotalHits(true);
 
-		return elasticsearchOperations.queryForPage(queryBuilder.build(), Relationship.class);
+		SearchHits<Relationship> searchHits = elasticsearchOperations.search(searchQuery, Relationship.class);
+		return new PageImpl<>(searchHits.get().map(SearchHit::getContent).collect(Collectors.toList()), page, searchHits.getTotalHits());
+	}
+
+	private List<Relationship> findRelationships(Set<String> relationshipIds, String branchPath) {
+		BranchCriteria branchCriteria = versionControlHelper.getBranchCriteria(branchPath);
+		return elasticsearchOperations.search(new NativeSearchQueryBuilder()
+				.withQuery(boolQuery()
+						.must(branchCriteria.getEntityBranchCriteria(Relationship.class))
+						.must(termsQuery(Relationship.Fields.RELATIONSHIP_ID, relationshipIds))
+				)
+				.withPageable(PageRequest.of(0, relationshipIds.size()))
+				.build(), Relationship.class)
+				.get().map(SearchHit::getContent).collect(Collectors.toList());
 	}
 
 	List<Long> findRelationshipDestinationIds(Collection<Long> sourceConceptIds, Collection<Long> attributeTypeIds, BranchCriteria branchCriteria, boolean stated) {
@@ -102,10 +128,32 @@ public class RelationshipService extends ComponentService {
 			return Collections.emptyList();
 		}
 
+		Set<Long> destinationIds = new LongArraySet();
+		if (sourceConceptIds == null) {
+			NativeSearchQuery query = constructDestinationSearchQuery(sourceConceptIds, attributeTypeIds, branchCriteria, stated);
+			try (SearchHitsIterator<Relationship> stream = elasticsearchOperations.searchForStream(query, Relationship.class)) {
+				stream.forEachRemaining(hit -> destinationIds.add(parseLong(hit.getContent().getDestinationId())));
+			}
+		} else {
+			for (List<Long> batch : Iterables.partition(sourceConceptIds, CLAUSE_LIMIT)) {
+				NativeSearchQuery query = constructDestinationSearchQuery(batch, attributeTypeIds, branchCriteria, stated);
+				try (SearchHitsIterator<Relationship> stream = elasticsearchOperations.searchForStream(query, Relationship.class)) {
+					stream.forEachRemaining(hit -> destinationIds.add(parseLong(hit.getContent().getDestinationId())));
+				}
+			}
+		}
+		// Stream search doesn't sort for us
+		// Sorting meaningless but supports deterministic pagination
+		List<Long> sortedIds = new LongArrayList(destinationIds);
+		sortedIds.sort(LongComparators.OPPOSITE_COMPARATOR);
+		return sortedIds;
+	}
+
+	private NativeSearchQuery constructDestinationSearchQuery(Collection<Long> sourceConceptIds, Collection<Long> attributeTypeIds, BranchCriteria branchCriteria, boolean stated) {
 		BoolQueryBuilder boolQuery = boolQuery()
 				.must(branchCriteria.getEntityBranchCriteria(Relationship.class))
 				.must(termsQuery(Relationship.Fields.CHARACTERISTIC_TYPE_ID, stated ? Concepts.STATED_RELATIONSHIP : Concepts.INFERRED_RELATIONSHIP))
-				.must(termsQuery(Relationship.Fields.ACTIVE, true));
+				.must(termQuery(Relationship.Fields.ACTIVE, true));
 
 		if (attributeTypeIds != null) {
 			boolQuery.must(termsQuery(Relationship.Fields.TYPE_ID, attributeTypeIds));
@@ -115,20 +163,65 @@ public class RelationshipService extends ComponentService {
 			boolQuery.must(termsQuery(Relationship.Fields.SOURCE_ID, sourceConceptIds));
 		}
 
-		NativeSearchQuery query = new NativeSearchQueryBuilder()
+		return new NativeSearchQueryBuilder()
 				.withQuery(boolQuery)
+				.withFields(Relationship.Fields.DESTINATION_ID)
 				.withPageable(LARGE_PAGE)
 				.build();
+	}
 
-		Set<Long> destinationIds = new LongArraySet();
-		try (CloseableIterator<Relationship> stream = elasticsearchOperations.stream(query, Relationship.class)) {
-			stream.forEachRemaining(relationship -> destinationIds.add(parseLong(relationship.getDestinationId())));
+	/**
+	 * Delete a relationship by id.
+	 * @param relationshipId The id of the relationship to be deleted.
+	 * @param branch The branch on which to make the change.
+	 * @param force Delete the relationship even if it has been released.
+	 */
+	public void deleteRelationship(String relationshipId, String branch, boolean force) {
+		Relationship relationship = findRelationship(BranchPathUriUtil.decodePath(branch), relationshipId);
+		if (relationship == null) {
+			throw new NotFoundException("Relationship not found.");
+		}
+		if (relationship.isReleased() && !force) {
+			throw new IllegalArgumentException("Relationship is released so can not be deleted.");
+		}
+		try (Commit commit = branchService.openCommit(branch)) {
+			relationship.markDeleted();
+			conceptUpdateHelper.doSaveBatchRelationships(Collections.singleton(relationship), commit);
+			commit.markSuccessful();
+		}
+	}
+
+	/**
+	 * Delete a set of relationships by id.
+	 * @param relationshipIds The ids of the relationships to be deleted.
+	 * @param branch The branch on which to make the change.
+	 * @param force Delete the relationships even if they have been released.
+	 */
+	public void deleteRelationships(Set<String> relationshipIds, String branch, boolean force) {
+		if (relationshipIds.isEmpty()) {
+			return;
 		}
 
-		// Stream search doesn't sort for us
-		// Sorting meaningless but supports deterministic pagination
-		List<Long> sortedIds = new LongArrayList(destinationIds);
-		sortedIds.sort(LongComparators.OPPOSITE_COMPARATOR);
-		return sortedIds;
+		List<Relationship> matches = findRelationships(relationshipIds, BranchPathUriUtil.decodePath(branch));
+		if (matches.size() != relationshipIds.size()) {
+			List<String> matchedIds = matches.stream().map(Relationship::getRelationshipId).collect(Collectors.toList());
+			Set<String> missingIds = new HashSet<>(relationshipIds);
+			missingIds.removeAll(matchedIds);
+			throw new NotFoundException(String.format("%s relationships not found on branch %s: %s", missingIds.size(), branch, missingIds));
+		}
+
+		for (Relationship relationship : matches) {
+			if (relationship.isReleased() && !force) {
+				throw new IllegalStateException(String.format("Relationship %s has been released and can't be deleted on branch %s.", relationship.getId(), branch));
+			}
+		}
+
+		try (Commit commit = branchService.openCommit(branch)) {
+			for (Relationship relationship : matches) {
+				relationship.markDeleted();
+			}
+			conceptUpdateHelper.doSaveBatchRelationships(matches, commit);
+			commit.markSuccessful();
+		}
 	}
 }

@@ -3,10 +3,8 @@ package org.snomed.snowstorm.rest;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.ObjectWriter;
-import org.json.JSONException;
-import org.json.JSONObject;
 import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 import org.snomed.snowstorm.core.data.domain.*;
 import org.snomed.snowstorm.core.data.repositories.config.ConceptStoreMixIn;
 import org.snomed.snowstorm.core.data.repositories.config.DescriptionStoreMixIn;
@@ -16,7 +14,7 @@ import java.io.IOException;
 
 import static org.junit.Assert.*;
 
-public class ConceptSerialisationTest {
+class ConceptSerialisationTest {
 
 	private final ObjectMapper generalObjectMapper = new ObjectMapper();
 
@@ -26,7 +24,7 @@ public class ConceptSerialisationTest {
 			.addMixIn(Description.class, DescriptionStoreMixIn.class);
 
 	@Test
-	public void testDeserialisation() throws IOException {
+	void testDeserialisation() throws IOException {
 		final ConceptView concept = generalObjectMapper.readValue(("{" +
 				"'definitionStatus': 'PRIMITIVE'," +
 				"'descriptions': [{'descriptionId': '123', 'acceptabilityMap': {'a': 'b'}}]," +
@@ -53,9 +51,11 @@ public class ConceptSerialisationTest {
 	}
 
 	@Test
-	public void testRESTApiSerialisation() throws JsonProcessingException {
+	void testRESTApiSerialisation() throws JsonProcessingException {
 		ObjectWriter restApiWriter = generalObjectMapper.writerWithView(View.Component.class).forType(ConceptView.class);
-		final String conceptJson = restApiWriter.writeValueAsString(new Concept("123", null, true, "33", "900000000000074008"));
+		Concept concept = new Concept("123", null, true, "33", "900000000000074008");
+		concept.setDescendantCount(123L);
+		final String conceptJson = restApiWriter.writeValueAsString(concept);
 		System.out.println(conceptJson);
 		assertFalse(conceptJson.contains("internalId"));
 		assertFalse(conceptJson.contains("path"));
@@ -64,6 +64,7 @@ public class ConceptSerialisationTest {
 		assertFalse(conceptJson.contains("effectiveTimeI"));
 		assertFalse(conceptJson.contains("releaseHash"));
 		assertFalse(conceptJson.contains("allOwlAxiomMembers"));
+		assertFalse(conceptJson.contains("descendantCount"));
 
 		assertTrue(conceptJson.contains("fsn"));
 		assertTrue(conceptJson.contains("pt"));
@@ -74,9 +75,10 @@ public class ConceptSerialisationTest {
 	}
 
 	@Test
-	public void testStoreSerialisation() throws JsonProcessingException {
+	void testStoreSerialisation() throws JsonProcessingException {
 		// Dummy data to serialise
 		Concept concept = new Concept("123", null, true, "33", "900000000000074008");
+		concept.setDescendantCount(123L);
 
 		final String conceptJson = storeObjectMapper.writeValueAsString(concept);
 		System.out.println(conceptJson);
@@ -93,6 +95,7 @@ public class ConceptSerialisationTest {
 		assertFalse(conceptJson.contains("gciAxioms"));
 		assertFalse(conceptJson.contains("allOwlAxiomMembers"));
 		assertFalse(conceptJson.contains("associationTargets"));
+		assertFalse(conceptJson.contains("descendantCount"));
 
 		assertTrue(conceptJson.contains("internalId"));
 		assertTrue(conceptJson.contains("path"));

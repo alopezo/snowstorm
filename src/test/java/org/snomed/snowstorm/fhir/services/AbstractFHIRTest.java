@@ -1,11 +1,16 @@
 package org.snomed.snowstorm.fhir.services;
 
+import static org.junit.Assert.assertNotNull;
+
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.util.*;
 
+import org.hl7.fhir.r4.model.BooleanType;
 import org.hl7.fhir.r4.model.CodeType;
 import org.hl7.fhir.r4.model.Coding;
 import org.hl7.fhir.r4.model.OperationOutcome;
+import org.hl7.fhir.r4.model.Parameters;
 import org.hl7.fhir.r4.model.OperationOutcome.IssueType;
 import org.hl7.fhir.r4.model.Parameters.ParametersParameterComponent;
 import org.hl7.fhir.r4.model.StringType;
@@ -13,24 +18,49 @@ import org.hl7.fhir.r4.model.Type;
 
 import io.kaicode.elasticvc.api.BranchService;
 
-import org.junit.Before;
+import org.junit.jupiter.api.*;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.snomed.snowstorm.AbstractTest;
+import org.snomed.snowstorm.TestConfig;
 import org.snomed.snowstorm.core.data.domain.*;
 import org.snomed.snowstorm.core.data.services.*;
 import org.snomed.snowstorm.core.data.services.pojo.CodeSystemConfiguration;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.client.TestRestTemplate;
 import org.springframework.boot.web.server.LocalServerPort;
 import org.springframework.http.*;
+import org.springframework.security.core.authority.SimpleGrantedAuthority;
+import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.security.core.context.SecurityContextImpl;
+import org.springframework.security.web.authentication.preauth.PreAuthenticatedAuthenticationToken;
+import org.springframework.test.context.junit.jupiter.SpringExtension;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.common.collect.Sets;
 
 import ca.uhn.fhir.context.FhirContext;
 import ca.uhn.fhir.parser.IParser;
+import org.testcontainers.junit.jupiter.Testcontainers;
 
-public abstract class AbstractFHIRTest extends AbstractTest {
+/**
+ * 	The data that is set up here is used by the majority of test cases in a read-only manner
+ *	so it makes sense to perform this expensive operation (especially the setup of the JSONParser)
+ *	only once.  Similarly we keep a count of the number of classes run to ensure that the final
+ *  teardown is called only once.
+ *
+ *	Ideally this would run in a @BeforeAll method, but that wouldn't allow access to the autowired
+ *	member variables, so the boolean "setupComplete" is simulating that behaviour
+ *
+ */
+@ExtendWith(SpringExtension.class)
+@Testcontainers
+@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT, classes = TestConfig.class)
+@TestInstance(TestInstance.Lifecycle.PER_CLASS)
+public abstract class AbstractFHIRTest {
 
 	@LocalServerPort
 	protected int port;
@@ -52,23 +82,56 @@ public abstract class AbstractFHIRTest extends AbstractTest {
 	
 	@Autowired
 	protected CodeSystemConfigurationService codeSystemConfigurationService;
+	
+	@Value("${ims-security.roles.enabled}")
+	private boolean rolesEnabled;
 
 	protected static final String sampleSCTID = "257751006";
 	protected static final String sampleModuleId = "1234";
 	protected static final String sampleVersion = "20190731";
 	protected final String MAIN = "MAIN";
-	protected IParser fhirJsonParser;
-	HttpEntity<String> defaultRequestEntity;
-	boolean setupComplete = false;
-	ObjectMapper mapper = new ObjectMapper();
+	static String baseUrl;
+	static HttpHeaders headers;
+	
+	static protected IParser fhirJsonParser;
+	static HttpEntity<String> defaultRequestEntity;
+	static boolean setupComplete = false;
+	static ObjectMapper mapper = new ObjectMapper();
 
 	protected final Logger logger = LoggerFactory.getLogger(getClass());
+	protected static final Logger slogger = LoggerFactory.getLogger(AbstractFHIRTest.class);
 	
-	@Before
-	synchronized public void setup() throws ServiceException, InterruptedException {
+	private static final int TOTAL_TEST_CLASSES = 6;
+	private static int testClassesRun = 0;
+
+	@AfterAll
+	void finalTearDown() {
+		if (testClassesRun >= TOTAL_TEST_CLASSES) {
+			logger.warn("Digging up the Potatoes");
+			branchService.deleteAll();
+			conceptService.deleteAll();
+			codeSystemService.deleteAll();
+		}
+	}
+
+	@BeforeAll
+	void setup() throws ServiceException, InterruptedException {
+		testClassesRun++;
 		if (setupComplete) {
 			return;
 		}
+		// Setup security
+		if (!rolesEnabled) {
+			PreAuthenticatedAuthenticationToken authentication = new PreAuthenticatedAuthenticationToken("test-admin", "123", Sets.newHashSet(new SimpleGrantedAuthority("USER")));
+			SecurityContextHolder.setContext(new SecurityContextImpl(authentication));
+		} else {
+			SecurityContextHolder.clearContext();
+		}
+		
+		baseUrl = "http://localhost:" + port + "/fhir/ValueSet";
+		headers = new HttpHeaders();
+		headers.setContentType(new MediaType("application", "fhir+json", StandardCharsets.UTF_8));
+		headers.setAccept(Collections.singletonList(MediaType.APPLICATION_JSON));
 		
 		fhirJsonParser = FhirContext.forR4().newJsonParser();
 		
@@ -81,12 +144,15 @@ public abstract class AbstractFHIRTest extends AbstractTest {
 		for (int x=1; x<=10; x++) {
 			createDummyData(x, concepts);
 		}
+		branchService.create(MAIN);
 		conceptService.batchCreate(concepts, MAIN);
 		
 		// Version content to fill effectiveTime fields
 		CodeSystem codeSystem = new CodeSystem("SNOMEDCT", MAIN);
+		//codeSystemConfigurationService.getConfigurations().add(config);
+
 		codeSystemService.createCodeSystem(codeSystem);
-		codeSystemService.createVersion(codeSystem, 20190731, "");
+		codeSystemService.createVersion(codeSystem, Integer.parseInt(sampleVersion), "");
 		
 		//Now create a new branch to hold a new edition
 		String releaseBranch = MAIN + "/" + sampleVersion;
@@ -99,14 +165,16 @@ public abstract class AbstractFHIRTest extends AbstractTest {
 		codeSystemConfigurationService.getConfigurations().add(config);
 
 		concepts.clear();
-		//concepts.add(new Concept(Concepts.SNOMEDCT_ROOT));
+		//The new module will inherit the 10 concepts from MAIN.  Add two new unqique to MAIN/SNOMEDCT-WK
 		for (int x=11; x<=12; x++) {
 			createDummyData(x, concepts);
 		}
 		conceptService.batchCreate(concepts, branchWK);
 		CodeSystem codeSystemWK = new CodeSystem("SNOMEDCT-WK", branchWK);
 		codeSystemService.createCodeSystem(codeSystemWK);
-		codeSystemService.createVersion(codeSystemWK, 20190731, "");
+		codeSystemService.createVersion(codeSystemWK, 20190731, "Unit Test Version");
+		
+		assertNotNull(codeSystemService.findByDefaultModule(sampleModuleId));
 		
 		logger.info("Baked Potato test data setup complete");
 		
@@ -116,7 +184,7 @@ public abstract class AbstractFHIRTest extends AbstractTest {
 		
 		setupComplete = true;
 	}
-
+	
 	private void createDummyData(int sequence, List<Concept> concepts) throws ServiceException {
 		// Create dummy concept with descriptions and relationships
 		Relationship infParentRel = new Relationship(Concepts.ISA, Concepts.SNOMEDCT_ROOT);
@@ -150,6 +218,9 @@ public abstract class AbstractFHIRTest extends AbstractTest {
 	}
 	
 	protected String toString(Type value) {
+		if (value == null) {
+			return null;
+		}
 		if (value instanceof Coding) {
 			Coding codingValue = (Coding)value;
 			return "[ " + codingValue.getSystem() + " : " + codingValue.getCode() + "|" + codingValue.getDisplay()  + "| ]";
@@ -157,6 +228,8 @@ public abstract class AbstractFHIRTest extends AbstractTest {
 			CodeType codeValue = (CodeType)value;
 			return  codeValue.getCode();
 		} else if (value instanceof StringType) {
+			return value.castToString(value).asStringValue();
+		} else if (value instanceof BooleanType) {
 			return value.castToString(value).asStringValue();
 		} else {
 			return value.toString();
@@ -181,6 +254,39 @@ public abstract class AbstractFHIRTest extends AbstractTest {
 		} catch (IOException e) {
 			throw new FHIROperationException(IssueType.EXCEPTION, body);
 		}
+	}
+	
+	protected Parameters get(String url) throws FHIROperationException {
+		ResponseEntity<String> response = this.restTemplate.exchange(url, HttpMethod.GET, defaultRequestEntity, String.class);
+		checkForError(response);
+		return fhirJsonParser.parseResource(Parameters.class, response.getBody());
+	}
+	
+	protected Type getProperty(Parameters params, String propertyName) {
+		Map<String, Type> propertyMap = new HashMap<>();
+		for (ParametersParameterComponent p : params.getParameter()) {
+			if (p.getName().equals("property")) {
+				populatePropertyMap(propertyMap, p.getPart());
+			}
+			if (p.getName().equals(propertyName)) {
+				return p.getValue();
+			}
+		}
+		return propertyMap.get(propertyName);
+	}
+	
+
+	private void populatePropertyMap(Map<String, Type> propertyMap, List<ParametersParameterComponent> parts) {
+		String key = null;
+		Type value = null;
+		for (ParametersParameterComponent part : parts) {
+			if (part.getName().equals("code")) {
+				key = part.getValue().castToString(part.getValue()).asStringValue();
+			} else {
+				value = part.getValue();
+			}
+		}
+		propertyMap.put(key, value);
 	}
 
 }

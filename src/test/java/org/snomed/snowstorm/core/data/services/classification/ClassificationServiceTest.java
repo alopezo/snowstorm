@@ -1,11 +1,11 @@
 package org.snomed.snowstorm.core.data.services.classification;
 
+import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Sets;
 import io.kaicode.elasticvc.api.BranchService;
-import org.junit.Test;
-import org.junit.runner.RunWith;
+import org.junit.jupiter.api.Test;
 import org.snomed.snowstorm.AbstractTest;
-import org.snomed.snowstorm.TestConfig;
+import org.snomed.snowstorm.config.Config;
 import org.snomed.snowstorm.core.data.domain.CodeSystem;
 import org.snomed.snowstorm.core.data.domain.Concept;
 import org.snomed.snowstorm.core.data.domain.Concepts;
@@ -20,8 +20,6 @@ import org.snomed.snowstorm.core.data.services.ConceptService;
 import org.snomed.snowstorm.core.data.services.ServiceException;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.security.core.context.SecurityContextHolder;
-import org.springframework.test.context.ContextConfiguration;
-import org.springframework.test.context.junit4.SpringJUnit4ClassRunner;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
@@ -29,19 +27,15 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
-import java.util.function.Predicate;
 import java.util.stream.Collectors;
 
 import static io.kaicode.elasticvc.api.VersionControlHelper.LARGE_PAGE;
 import static junit.framework.TestCase.assertNull;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.*;
 import static org.snomed.snowstorm.core.data.domain.classification.ClassificationStatus.COMPLETED;
 import static org.snomed.snowstorm.core.data.domain.classification.ClassificationStatus.SAVED;
 
-@RunWith(SpringJUnit4ClassRunner.class)
-@ContextConfiguration(classes = TestConfig.class)
-public class ClassificationServiceTest extends AbstractTest {
+class ClassificationServiceTest extends AbstractTest {
 
 	@Autowired
 	private ClassificationService classificationService;
@@ -62,7 +56,7 @@ public class ClassificationServiceTest extends AbstractTest {
 	private BranchService branchService;
 
 	@Test
-	public void testSaveRelationshipChanges() throws IOException, ServiceException {
+	void testSaveRelationshipChanges() throws IOException, ServiceException {
 		// Create concept with some stated modeling in an axiom
 		conceptService.create(
 				new Concept("123123123001")
@@ -73,7 +67,10 @@ public class ClassificationServiceTest extends AbstractTest {
 
 		// Save mock classification results with mix of previously stated and new triples
 		String classificationId = UUID.randomUUID().toString();
-		classificationService.saveRelationshipChanges(classificationId, new ByteArrayInputStream(("" +
+		Classification classification = new Classification();
+		classification.setId(classificationId);
+		classification.setPath("MAIN");
+		classificationService.saveRelationshipChanges(classification, new ByteArrayInputStream(("" +
 				"id\teffectiveTime\tactive\tmoduleId\tsourceId\tdestinationId\trelationshipGroup\ttypeId\tcharacteristicTypeId\tmodifierId\n" +
 				"\t\t1\t\t123123123001\t138875005\t0\t116680003\t900000000000227009\t900000000000451002\n" +
 				"\t\t1\t\t123123123001\t84301002\t0\t363698007\t900000000000227009\t900000000000451002\n" +
@@ -96,7 +93,41 @@ public class ClassificationServiceTest extends AbstractTest {
 	}
 
 	@Test
-	public void testRemoveNotReleasedRedundantRelationships() throws IOException, ServiceException, InterruptedException {
+	void testSaveRelationshipChangesInExtension() throws IOException, ServiceException, InterruptedException {
+		// Create concept with some stated modeling in an axiom
+		conceptService.create(
+				new Concept("123123123001")
+						.addAxiom(
+								new Relationship(Concepts.ISA, Concepts.SNOMEDCT_ROOT),
+								new Relationship("363698007", "84301002")
+						), "MAIN");
+
+		String extensionBranchPath = "MAIN/SNOMEDCT-SE";
+		codeSystemService.createCodeSystem(new CodeSystem("SNOMEDCT-SE", extensionBranchPath));
+		branchService.updateMetadata(extensionBranchPath, ImmutableMap.of(Config.DEFAULT_MODULE_ID_KEY, "45991000052106", Config.DEFAULT_NAMESPACE_KEY, "1000052"));
+
+		// Save mock classification results
+		Classification classification = createClassification(extensionBranchPath, UUID.randomUUID().toString());
+		classificationService.saveRelationshipChanges(classification, new ByteArrayInputStream(("" +
+				"id\teffectiveTime\tactive\tmoduleId\tsourceId\tdestinationId\trelationshipGroup\ttypeId\tcharacteristicTypeId\tmodifierId\n" +
+				"\t\t1\t\t123123123001\t138875005\t0\t116680003\t900000000000227009\t900000000000451002\n" +
+				"\t\t1\t\t123123123001\t84301002\t0\t363698007\t900000000000227009\t900000000000451002\n" +
+				"\t\t1\t\t123123123001\t50960005\t0\t116676008\t900000000000227009\t900000000000451002\n" +
+				"\t\t1\t\t123123123001\t247247001\t0\t116680003\t900000000000227009\t900000000000451002\n" +
+				"").getBytes()));
+
+		assertEquals(SAVED, saveClassificationAndWaitForCompletion(extensionBranchPath, classification.getId()));
+
+		Concept concept = conceptService.find("123123123001", extensionBranchPath);
+		assertEquals(4, concept.getRelationships().size());
+		for (Relationship relationship : concept.getRelationships()) {
+			assertEquals("New inferred relationships have the configured module applied.", "45991000052106", relationship.getModuleId());
+			assertTrue("New inferred relationships have SCTIDs in the configured namespace and correct partition ID", relationship.getId().contains("1000052" + "12"));
+		}
+	}
+
+	@Test
+	void testRemoveNotReleasedRedundantRelationships() throws IOException, ServiceException, InterruptedException {
 		// Create concept with some stated modeling in an axiom
 		String path = "MAIN";
 		String conceptId = "123123123001";
@@ -109,8 +140,8 @@ public class ClassificationServiceTest extends AbstractTest {
 		Relationship relationship = conceptService.find(conceptId, path).getRelationships().stream().filter(r -> r.getTypeId().equals("363698007")).collect(Collectors.toList()).get(0);
 
 		String classificationId = UUID.randomUUID().toString();
-		createClassification(path, classificationId);
-		classificationService.saveRelationshipChanges(classificationId, new ByteArrayInputStream(("" +
+		Classification classification = createClassification(path, classificationId);
+		classificationService.saveRelationshipChanges(classification, new ByteArrayInputStream(("" +
 				"id\teffectiveTime\tactive\tmoduleId\tsourceId\tdestinationId\trelationshipGroup\ttypeId\tcharacteristicTypeId\tmodifierId\n" +
 				relationship.getId() + "\t\t0\t\t123123123001\t84301002\t0\t363698007\t900000000000011006\t900000000000451002\n" +
 				"").getBytes()));
@@ -127,7 +158,7 @@ public class ClassificationServiceTest extends AbstractTest {
 	}
 
 	@Test
-	public void testRemoveReleasedRedundantRelationships() throws IOException, ServiceException, InterruptedException {
+	void testRemoveReleasedRedundantRelationships() throws IOException, ServiceException, InterruptedException {
 		// Create concept with some stated modeling in an axiom
 		String path = "MAIN";
 		String conceptId = "123123123001";
@@ -145,8 +176,8 @@ public class ClassificationServiceTest extends AbstractTest {
 		Relationship relationship = conceptService.find(conceptId, path).getRelationships().stream().filter(r -> r.getTypeId().equals("363698007")).collect(Collectors.toList()).get(0);
 
 		String classificationId = UUID.randomUUID().toString();
-		createClassification(path, classificationId);
-		classificationService.saveRelationshipChanges(classificationId, new ByteArrayInputStream(("" +
+		Classification classification = createClassification(path, classificationId);
+		classificationService.saveRelationshipChanges(classification, new ByteArrayInputStream(("" +
 				"id\teffectiveTime\tactive\tmoduleId\tsourceId\tdestinationId\trelationshipGroup\ttypeId\tcharacteristicTypeId\tmodifierId\n" +
 				relationship.getId() + "\t\t0\t\t123123123001\t84301002\t0\t363698007\t900000000000011006\t900000000000451002\n" +
 				"").getBytes()));
@@ -167,7 +198,7 @@ public class ClassificationServiceTest extends AbstractTest {
 		assertNull(inactiveRelationship.getEffectiveTime());
 	}
 
-	public void createClassification(String path, String classificationId) {
+	Classification createClassification(String path, String classificationId) {
 		Classification classification = new Classification();
 		classification.setId(classificationId);
 		classification.setPath(path);
@@ -175,9 +206,10 @@ public class ClassificationServiceTest extends AbstractTest {
 		classification.setLastCommitDate(branchService.findLatest(path).getHead());
 		classification.setInferredRelationshipChangesFound(true);
 		classificationRepository.save(classification);
+		return classification;
 	}
 
-	public ClassificationStatus saveClassificationAndWaitForCompletion(String path, String classificationId) throws InterruptedException {
+	ClassificationStatus saveClassificationAndWaitForCompletion(String path, String classificationId) throws InterruptedException {
 		classificationService.saveClassificationResultsToBranch(path, classificationId, SecurityContextHolder.getContext());
 		Set<ClassificationStatus> inProgressStatuses = Sets.newHashSet(COMPLETED, ClassificationStatus.SAVING_IN_PROGRESS);
 		for (int i = 0; inProgressStatuses.contains(classificationService.findClassification(path, classificationId).getStatus()) && i < 20; i++) {

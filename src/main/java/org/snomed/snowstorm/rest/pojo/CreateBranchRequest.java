@@ -1,5 +1,7 @@
 package org.snomed.snowstorm.rest.pojo;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
+
 import java.util.Map;
 
 public class CreateBranchRequest {
@@ -30,5 +32,10 @@ public class CreateBranchRequest {
 
 	public void setMetadata(Map<String, Object> metadata) {
 		this.metadata = metadata;
+	}
+
+	@JsonIgnore
+	public String getBranch() {
+		return getParent() + "/" + getName();
 	}
 }

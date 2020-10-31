@@ -20,6 +20,11 @@ public class SEclAttributeGroup extends EclAttributeGroup implements SRefinement
 		((SEclAttributeSet)attributeSet).addCriteria(new SubRefinementBuilder(refinementBuilder, attributesQueryForSingleGroup));
 	}
 
+	@Override
+	public Set<String> getConceptIds() {
+		return ((SEclAttributeSet) attributeSet).getConceptIds();
+	}
+
 	boolean isMatch(MatchContext matchContext) {
 		MatchContext groupMatchContext = new MatchContext(matchContext, true);
 		((SEclAttributeSet) attributeSet).isMatch(groupMatchContext);

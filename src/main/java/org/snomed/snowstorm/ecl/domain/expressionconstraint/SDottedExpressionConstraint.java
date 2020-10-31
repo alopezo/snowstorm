@@ -11,10 +11,10 @@ import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Slice;
 
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.List;
-import java.util.Optional;
+import java.util.*;
+
+import static com.google.common.collect.Sets.newHashSet;
+import static java.util.stream.Collectors.toSet;
 
 public class SDottedExpressionConstraint extends DottedExpressionConstraint implements SExpressionConstraint {
 	public SDottedExpressionConstraint(SubExpressionConstraint subExpressionConstraint) {
@@ -50,6 +50,19 @@ public class SDottedExpressionConstraint extends DottedExpressionConstraint impl
 	@Override
 	public Optional<Page<Long>> select(RefinementBuilder refinementBuilder) {
 		return select(refinementBuilder.getPath(), refinementBuilder.getBranchCriteria(), refinementBuilder.isStated(), null, null, refinementBuilder.getQueryService());
+	}
+
+	@Override
+	public Set<String> getConceptIds() {
+		Set<String> conceptIds = newHashSet();
+		conceptIds.addAll(((SSubExpressionConstraint) subExpressionConstraint).getConceptIds());
+		Set<String> dottedAttributesConceptIds = dottedAttributes.stream()
+				.map(SSubExpressionConstraint.class::cast)
+				.map(SSubExpressionConstraint::getConceptIds)
+				.flatMap(Set::stream)
+				.collect(toSet());
+		conceptIds.addAll(dottedAttributesConceptIds);
+		return conceptIds;
 	}
 
 	@Override

@@ -1,44 +1,57 @@
-# ❄️ Snowstorm Terminology Server [![Build Status](https://travis-ci.org/IHTSDO/snowstorm.svg?branch=master)](https://travis-ci.org/IHTSDO/snowstorm) [![Language grade: Java](https://img.shields.io/lgtm/grade/java/g/IHTSDO/snowstorm.svg?logo=lgtm&logoWidth=18)](https://lgtm.com/projects/g/IHTSDO/snowstorm/context:java) [![codecov](https://codecov.io/gh/IHTSDO/snowstorm/branch/master/graph/badge.svg)](https://codecov.io/gh/IHTSDO/snowstorm)
+![Snowstorm Terminology Server](docs/images/SNOWSTORM-logo.svg)
+
+[![Build Status](https://travis-ci.org/IHTSDO/snowstorm.svg?branch=master)](https://travis-ci.org/IHTSDO/snowstorm) [![Language grade: Java](https://img.shields.io/lgtm/grade/java/g/IHTSDO/snowstorm.svg?logo=lgtm&logoWidth=18)](https://lgtm.com/projects/g/IHTSDO/snowstorm/context:java) [![codecov](https://codecov.io/gh/IHTSDO/snowstorm/branch/master/graph/badge.svg)](https://codecov.io/gh/IHTSDO/snowstorm)
+[![Docker](https://img.shields.io/docker/pulls/snomedinternational/snowstorm)](https://hub.docker.com/r/snomedinternational/snowstorm)
 
 Snowstorm is a SNOMED CT terminology server built on top of Elasticsearch, with a focus on performance and enterprise scalability.
 
 ## Project Status
 
-**Read-Only** - tested and already used in the SNOMED International Browser for ECL queries. Snowstorm can be used in local implementations to query SNOMED CT with the following features:
+### Read-Only Use
+Snowstorm provides the API for the SNOMED International Browser including the International Edition and many Extensions. 
 
+Snowstorm can be used in local implementations to query SNOMED CT with the following features:
 - Hosting multiple extensions alongside the International Edition of SNOMED CT
 - Multi-lingual search and content retrieval
 - Fully ECL v1.3 compliant
-- Full history (depending on initial RF2 import decision)
-- Read-only FHIR API
+- Full history (depends on full RF2 import)
+- Read-only FHIR API :fire:
 
-**Authoring** - tested and being used by SNOMED International to author and maintain the International Edition of SNOMED CT.
+### Authoring Use
+Snowstorm provides the API for the Authoring Platform of the International Edition of SNOMED CT.
 
-Please add any issues or any questions in the [GitHub issues page](https://github.com/IHTSDO/snowstorm/issues).
+Development and testing is currently in progress for the authoring of SNOMED CT extensions.
 
 ## Documentation
 
-Documentation is sparse for now, but will be improved as the project moves out of a proof of concept phase.
+- Setup
+  - [Getting Started (plain installation)](docs/getting-started.md)
+  - [Configuration Guide](docs/configuration-guide.md)
+    - [Security Configuration Guide](docs/security-configuration.md)
+    - [Language Specific Search Behaviour](docs/language-specific-search.md)
+  - [Loading SNOMED](docs/loading-snomed.md)
+  - [Loading & updating SNOMED CT with local Extensions or Editions](docs/updating-snomed-and-extensions.md)
+  - [Extension Authoring](docs/extension-authoring.md)
+  - [Elasticsearch Index Mapping Changes](docs/index-mapping-changes.md)
+  - [Docker Quickstart](docs/using-docker.md)
+- Use
+  - [Using the API](docs/using-the-api.md)
+  - [Using the FHIR API](docs/using-the-fhir-api.md)
 
-- [Getting Started (plain installation)](docs/getting-started.md)
-- [Loading SNOMED](docs/loading-snomed.md)
-- [Using the API](docs/using-the-api.md)
-- [Using the FHIR API](docs/using-the-fhir-api.md)
-- [Loading & updating SNOMED CT with local Extensions or Editions](docs/updating-snomed-and-extensions.md)
-- [Configuration Guide](docs/configuration-guide.md)
-- [Elasticsearch Index Mapping Changes](docs/index-mapping-changes.md)
-- [Docker Quickstart](docs/using-docker.md)
+## Contributing :star:
 
-## Contributing
+We welcome questions, ideas, issues and code contributions to this project. 
 
-1. Fork it!
-2. Create your feature branch: `git checkout -b my-new-feature`
-3. Commit your changes: `git commit -am 'Add some feature'`
-4. Push to the branch: `git push origin my-new-feature`
-5. Submit a pull request
+Use the [issues page](https://github.com/IHTSDO/snowstorm/issues) to get in touch with the community. 
+
+If you could like to make a code contribution please fork the repository and create a [GitHub pull request](https://help.github.com/en/github/collaborating-with-issues-and-pull-requests) to the `develop` branch.
 
 ## License
 
 Apache 2.0
 
 See the included LICENSE file for details.
+
+## Tools
+
+For Java performance profiling we recommend the JProfiler [Java profiler](https://www.ej-technologies.com/products/jprofiler/overview.html).

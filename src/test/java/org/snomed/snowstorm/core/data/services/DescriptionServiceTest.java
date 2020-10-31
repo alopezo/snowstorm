@@ -1,37 +1,35 @@
 package org.snomed.snowstorm.core.data.services;
 
-import com.google.common.collect.Lists;
 import io.kaicode.elasticvc.api.BranchService;
 import io.kaicode.elasticvc.domain.Commit;
 import org.elasticsearch.common.util.set.Sets;
-import org.junit.Before;
-import org.junit.Test;
-import org.junit.runner.RunWith;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.snomed.snowstorm.AbstractTest;
 import org.snomed.snowstorm.TestConfig;
+import org.snomed.snowstorm.config.SearchLanguagesConfiguration;
 import org.snomed.snowstorm.core.data.domain.*;
+import org.snomed.snowstorm.core.data.services.pojo.DescriptionCriteria;
 import org.snomed.snowstorm.core.data.services.pojo.PageWithBucketAggregations;
-import org.snomed.snowstorm.rest.ControllerHelper;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.test.context.ContextConfiguration;
-import org.springframework.test.context.junit4.SpringJUnit4ClassRunner;
+import org.springframework.test.context.junit.jupiter.SpringExtension;
 
-import java.util.Collections;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 import java.util.stream.Collectors;
 
-import static com.google.common.collect.Sets.newHashSet;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
-import static org.snomed.snowstorm.core.data.domain.Concepts.ISA;
-import static org.snomed.snowstorm.core.data.domain.Concepts.SNOMEDCT_ROOT;
+import static com.google.common.collect.Lists.newArrayList;
+import static java.lang.Long.parseLong;
+import static org.junit.Assert.*;
+import static org.snomed.snowstorm.core.data.domain.Concepts.*;
 import static org.snomed.snowstorm.core.data.services.DescriptionService.SearchMode.REGEX;
+import static org.snomed.snowstorm.core.data.services.DescriptionService.SearchMode.WHOLE_WORD;
 
-@RunWith(SpringJUnit4ClassRunner.class)
+@ExtendWith(SpringExtension.class)
 @ContextConfiguration(classes = TestConfig.class)
-public class DescriptionServiceTest extends AbstractTest {
+class DescriptionServiceTest extends AbstractTest {
 
 	@Autowired
 	private BranchService branchService;
@@ -48,15 +46,18 @@ public class DescriptionServiceTest extends AbstractTest {
 	@Autowired
 	private ReferenceSetMemberService referenceSetMemberService;
 
+	@Autowired
+	private SearchLanguagesConfiguration searchLanguagesConfiguration;
+
 	private ServiceTestUtil testUtil;
 
-	@Before
-	public void setup() {
+	@BeforeEach
+	void setup() {
 		testUtil = new ServiceTestUtil(conceptService);
 	}
 
 	@Test
-	public void testDescriptionSearch() throws ServiceException {
+	void testDescriptionSearch() throws ServiceException {
 		testUtil.createConceptWithPathIdAndTerm("MAIN", "100001", "Heart");
 		testUtil.createConceptWithPathIdAndTerm("MAIN", "100002", "Lung");
 		testUtil.createConceptWithPathIdAndTerms("MAIN", "100006", "Foot cramps", "Foot cramp");
@@ -66,73 +67,88 @@ public class DescriptionServiceTest extends AbstractTest {
 
 		List<Description> content = descriptionService.findDescriptionsWithAggregations("MAIN", "Foo cr", ServiceTestUtil.PAGE_REQUEST).getContent();
 		List<String> actualTerms = content.stream().map(Description::getTerm).collect(Collectors.toList());
-		assertEquals(Lists.newArrayList("Foot cramp", "Foot cramps"), actualTerms);
+		assertEquals(newArrayList("Foot cramp", "Foot cramps"), actualTerms);
 
 		content = descriptionService.findDescriptionsWithAggregations("MAIN", "Foo", ServiceTestUtil.PAGE_REQUEST).getContent();
 		actualTerms = content.stream().map(Description::getTerm).collect(Collectors.toList());
-		assertEquals(Lists.newArrayList("Foot", "Footwear", "Foot bone", "Foot cramp", "Foot cramps"), actualTerms);
+		assertEquals(newArrayList("Foot", "Footwear", "Foot bone", "Foot cramp", "Foot cramps"), actualTerms);
 
-		boolean groupByConcept = true;
-		content = descriptionService.findDescriptionsWithAggregations("MAIN", "Foo", Collections.singleton("en"), true, null, null, null, null,
-				groupByConcept, DescriptionService.SearchMode.STANDARD, ServiceTestUtil.PAGE_REQUEST).getContent();
+		content = descriptionService.findDescriptionsWithAggregations("MAIN",
+				new DescriptionCriteria()
+						.term("Foo")
+						.active(true)
+						.groupByConcept(true),
+				ServiceTestUtil.PAGE_REQUEST).getContent();
 		actualTerms = content.stream().map(Description::getTerm).collect(Collectors.toList());
-		assertEquals(Lists.newArrayList("Foot", "Footwear", "Foot bone", "Foot cramp"), actualTerms);
+		assertEquals(newArrayList("Foot", "Footwear", "Foot bone", "Foot cramp"), actualTerms);
 
 		content = descriptionService.findDescriptionsWithAggregations("MAIN", "cramps", ServiceTestUtil.PAGE_REQUEST).getContent();
 		actualTerms = content.stream().map(Description::getTerm).collect(Collectors.toList());
-		assertEquals(Lists.newArrayList("Foot cramps"), actualTerms);
+		assertEquals(newArrayList("Foot cramps"), actualTerms);
 	}
 
 	@Test
-	public void testDescriptionSearchCharacterFolding() throws ServiceException {
+	void testDescriptionSearchCharacterFolding() throws ServiceException {
 		testUtil.createConceptWithPathIdAndTermWithLang("MAIN", "100001", "Heart", "en");
 		testUtil.createConceptWithPathIdAndTermWithLang("MAIN", "100002", "Lung", "en");
 		testUtil.createConceptWithPathIdAndTermWithLang("MAIN", "100003", "Foot cramps", "en");
 		testUtil.createConceptWithPathIdAndTermWithLang("MAIN", "100004", "Région de l'Afrique", "fr");
 		testUtil.createConceptWithPathIdAndTermWithLang("MAIN", "100005", "déficit de apolipoproteína", "es");
+		testUtil.createConceptWithPathIdAndTermWithLang("MAIN", "100006", "thing", "zz");
+		testUtil.createConceptWithPathIdAndTermWithLang("MAIN", "100007", "Ernährungsberater", "de");
 
 		// In the French language 'é' is NOT configured as an extra character in the alphabet so is folded to it's simpler form 'e' in the index.
 		// Searching for either 'é' or 'e' should give the same match.
-		assertEquals(1, descriptionService.findDescriptionsWithAggregations("MAIN", "région", newHashSet("fr"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
-		assertEquals(1, descriptionService.findDescriptionsWithAggregations("MAIN", "region", newHashSet("fr"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
+		assertEquals(1, descriptionService.findDescriptionsWithAggregations("MAIN", "région", newArrayList("fr"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
+		assertEquals(1, descriptionService.findDescriptionsWithAggregations("MAIN", "region", newArrayList("fr"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
 
 		// In the Spanish language 'é' IS configured as an extra character in the alphabet. It is kept as 'é' in the index.
 		// Searching for 'é' should match but 'e' should not because it's considered as a different letter altogether.
-		assertEquals(1, descriptionService.findDescriptionsWithAggregations("MAIN", "déficit", newHashSet("es"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
-		assertEquals(0, descriptionService.findDescriptionsWithAggregations("MAIN", "deficit", newHashSet("es"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
+		assertEquals(1, descriptionService.findDescriptionsWithAggregations("MAIN", "déficit", newArrayList("es"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
+		assertEquals(0, descriptionService.findDescriptionsWithAggregations("MAIN", "deficit", newArrayList("es"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
 		// Searching for both es and en language codes does not allow matching against the Spanish description with the é character
 		// because when the search term is folded for the English language matches are restricted to descriptions with en language code.
-		assertEquals(0, descriptionService.findDescriptionsWithAggregations("MAIN", "deficit", newHashSet("es", "en"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
+		assertEquals(0, descriptionService.findDescriptionsWithAggregations("MAIN", "deficit", newArrayList("es", "en"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
+
+		// Search all languages
+		List<String> languageCodes = null;
+		assertEquals(1, descriptionService.findDescriptionsWithAggregations("MAIN", "région", languageCodes, ServiceTestUtil.PAGE_REQUEST).getTotalElements());
+		assertEquals(1, descriptionService.findDescriptionsWithAggregations("MAIN", "déficit", languageCodes, ServiceTestUtil.PAGE_REQUEST).getTotalElements());
+		assertEquals(1, descriptionService.findDescriptionsWithAggregations("MAIN", "thing", languageCodes, ServiceTestUtil.PAGE_REQUEST).getTotalElements());
+
+		assertNull("No configuration exists for the de language.", searchLanguagesConfiguration.getCharactersNotFolded().get("de"));
+		assertEquals("Match a term containing special characters using a language which is not configured.",
+				1, descriptionService.findDescriptionsWithAggregations("MAIN", "Ernährungsberater", languageCodes, ServiceTestUtil.PAGE_REQUEST).getTotalElements());
 	}
 
 	@Test
-	public void testDescriptionSearchWithNonAlphanumericCharacters() throws ServiceException {
+	void testDescriptionSearchWithNonAlphanumericCharacters() throws ServiceException {
 		testUtil.createConceptWithPathIdAndTermWithLang("MAIN", "100001", "Urine micr.: leucs - % polys", "en");
 		testUtil.createConceptWithPathIdAndTermWithLang("MAIN", "100002", "Spinal fusion of atlas-axis,test (procedure)", "en");
 		testUtil.createConceptWithPathIdAndTermWithLang("MAIN", "100003", "test procedure", "en");
 
-		assertEquals(1, descriptionService.findDescriptionsWithAggregations("MAIN", "urine micr.: leucs - % polys", newHashSet("en"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
-		assertEquals(1, descriptionService.findDescriptionsWithAggregations("MAIN", "Urine Micr.: Leucs - % Polys", newHashSet("en"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
-		assertEquals(1, descriptionService.findDescriptionsWithAggregations("MAIN", "Urine micr leucs - % Polys", newHashSet("en"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
-		assertEquals(1, descriptionService.findDescriptionsWithAggregations("MAIN", "urine micr leucs polys", newHashSet("en"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
-		assertEquals(0, descriptionService.findDescriptionsWithAggregations("MAIN", "Urine micrr.: leucs", newHashSet("en"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
-		assertEquals(0, descriptionService.findDescriptionsWithAggregations("MAIN", "Urine mic.: leucs", newHashSet("en"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
-		assertEquals(1, descriptionService.findDescriptionsWithAggregations("MAIN", "Urine mic leucs", newHashSet("en"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
+		assertEquals(1, descriptionService.findDescriptionsWithAggregations("MAIN", "urine micr.: leucs - % polys", newArrayList("en"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
+		assertEquals(1, descriptionService.findDescriptionsWithAggregations("MAIN", "Urine Micr.: Leucs - % Polys", newArrayList("en"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
+		assertEquals(1, descriptionService.findDescriptionsWithAggregations("MAIN", "Urine micr leucs - % Polys", newArrayList("en"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
+		assertEquals(1, descriptionService.findDescriptionsWithAggregations("MAIN", "urine micr leucs polys", newArrayList("en"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
+		assertEquals(0, descriptionService.findDescriptionsWithAggregations("MAIN", "Urine micrr.: leucs", newArrayList("en"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
+		assertEquals(0, descriptionService.findDescriptionsWithAggregations("MAIN", "Urine mic.: leucs", newArrayList("en"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
+		assertEquals(1, descriptionService.findDescriptionsWithAggregations("MAIN", "Urine mic leucs", newArrayList("en"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
 
-		assertEquals(1, descriptionService.findDescriptionsWithAggregations("MAIN", "atlas-axis,", newHashSet("en"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
-		assertEquals(0, descriptionService.findDescriptionsWithAggregations("MAIN", "atla-axis,", newHashSet("en"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
-		assertEquals(1, descriptionService.findDescriptionsWithAggregations("MAIN", "Spinal fusion of atlas-axis", newHashSet("en"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
-		assertEquals(1, descriptionService.findDescriptionsWithAggregations("MAIN", "atlas axis", newHashSet("en"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
+		assertEquals(1, descriptionService.findDescriptionsWithAggregations("MAIN", "atlas-axis,", newArrayList("en"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
+		assertEquals(0, descriptionService.findDescriptionsWithAggregations("MAIN", "atla-axis,", newArrayList("en"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
+		assertEquals(1, descriptionService.findDescriptionsWithAggregations("MAIN", "Spinal fusion of atlas-axis", newArrayList("en"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
+		assertEquals(1, descriptionService.findDescriptionsWithAggregations("MAIN", "atlas axis", newArrayList("en"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
 
-		assertEquals(2, descriptionService.findDescriptionsWithAggregations("MAIN", "procedure", newHashSet("en"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
-		assertEquals(1, descriptionService.findDescriptionsWithAggregations("MAIN", "(procedure)", newHashSet("en"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
-		assertEquals(2, descriptionService.findDescriptionsWithAggregations("MAIN", "test procedure", newHashSet("en"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
-		assertEquals(1, descriptionService.findDescriptionsWithAggregations("MAIN", "test procedure)", newHashSet("en"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
+		assertEquals(2, descriptionService.findDescriptionsWithAggregations("MAIN", "procedure", newArrayList("en"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
+		assertEquals(1, descriptionService.findDescriptionsWithAggregations("MAIN", "(procedure)", newArrayList("en"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
+		assertEquals(2, descriptionService.findDescriptionsWithAggregations("MAIN", "test procedure", newArrayList("en"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
+		assertEquals(1, descriptionService.findDescriptionsWithAggregations("MAIN", "test procedure)", newArrayList("en"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
 
 	}
 
 	@Test
-	public void testDescriptionSearchWithEdgeCases() throws ServiceException {
+	void testDescriptionSearchWithEdgeCases() throws ServiceException {
 		testUtil.createConceptWithPathIdAndTermWithLang("MAIN", "100001", "Man (person)", "en");
 		testUtil.createConceptWithPathIdAndTermWithLang("MAIN", "100002", "Elderly man (person)", "en");
 		testUtil.createConceptWithPathIdAndTermWithLang("MAIN", "100003", "1.5%/epinephrine substance", "en");
@@ -140,22 +156,22 @@ public class DescriptionServiceTest extends AbstractTest {
 		testUtil.createConceptWithPathIdAndTermWithLang("MAIN", "100005", "drugs with 1.5%/epinephrine", "en");
 
 		// testing stop words
-		assertEquals(0, descriptionService.findDescriptionsWithAggregations("MAIN", "an man person not", newHashSet("en"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
+		assertEquals(0, descriptionService.findDescriptionsWithAggregations("MAIN", "an man person not", newArrayList("en"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
 
 		// Combining Regex search and simple query as term containing non-alphanumeric
-		assertEquals(2, descriptionService.findDescriptionsWithAggregations("MAIN", "Man (person)", newHashSet("en"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
-		assertEquals(3, descriptionService.findDescriptionsWithAggregations("MAIN", "1.5%/epine", newHashSet("en"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
-		assertEquals(1, descriptionService.findDescriptionsWithAggregations("MAIN", "1.5%/epinephrine (", newHashSet("en"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
-		assertEquals(2, descriptionService.findDescriptionsWithAggregations("MAIN", "1.5%/epinephrine substance", newHashSet("en"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
-		assertEquals(2, descriptionService.findDescriptionsWithAggregations("MAIN", "d 1.5%/epinephrine", newHashSet("en"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
+		assertEquals(2, descriptionService.findDescriptionsWithAggregations("MAIN", "Man (person)", newArrayList("en"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
+		assertEquals(3, descriptionService.findDescriptionsWithAggregations("MAIN", "1.5%/epine", newArrayList("en"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
+		assertEquals(1, descriptionService.findDescriptionsWithAggregations("MAIN", "1.5%/epinephrine (", newArrayList("en"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
+		assertEquals(2, descriptionService.findDescriptionsWithAggregations("MAIN", "1.5%/epinephrine substance", newArrayList("en"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
+		assertEquals(2, descriptionService.findDescriptionsWithAggregations("MAIN", "d 1.5%/epinephrine", newArrayList("en"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
 
 		// These two tests are to highlight that ElasticSearch simple query doesn't check cardinality
-		assertEquals(2, descriptionService.findDescriptionsWithAggregations("MAIN", "Man (person) p", newHashSet("en"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
-		assertEquals(2, descriptionService.findDescriptionsWithAggregations("MAIN", "man person p", newHashSet("en"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
+		assertEquals(2, descriptionService.findDescriptionsWithAggregations("MAIN", "Man (person) p", newArrayList("en"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
+		assertEquals(2, descriptionService.findDescriptionsWithAggregations("MAIN", "man person p", newArrayList("en"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
 	}
 
 	@Test
-	public void testDescriptionSearchWithExtendedCharacters() throws ServiceException {
+	void testDescriptionSearchWithExtendedCharacters() throws ServiceException {
 		testUtil.createConceptWithPathIdAndTermWithLang("MAIN", "100001", "Tübingen", "en");
 		testUtil.createConceptWithPathIdAndTermWithLang("MAIN", "100002", "Tubingen", "en");
 		testUtil.createConceptWithPathIdAndTermWithLang("MAIN", "100003", "Köln, Löwchen", "en");
@@ -175,35 +191,35 @@ public class DescriptionServiceTest extends AbstractTest {
 		testUtil.createConceptWithPathIdAndTermWithLang("MAIN", "1000013", "Lidocaine hydrochloride 1.5%/epinephrine", "en");
 		testUtil.createConceptWithPathIdAndTermWithLang("MAIN", "1000014", "Hypodermic needles & syringes", "en");
 
-		assertEquals(2, descriptionService.findDescriptionsWithAggregations("MAIN", "Tübingen", newHashSet("en"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
-		assertEquals(2, descriptionService.findDescriptionsWithAggregations("MAIN", "Tubingen", newHashSet("en"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
-		assertEquals(1, descriptionService.findDescriptionsWithAggregations("MAIN", "Köln, Löwchen", newHashSet("en"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
+		assertEquals(2, descriptionService.findDescriptionsWithAggregations("MAIN", "Tübingen", newArrayList("en"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
+		assertEquals(2, descriptionService.findDescriptionsWithAggregations("MAIN", "Tubingen", newArrayList("en"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
+		assertEquals(1, descriptionService.findDescriptionsWithAggregations("MAIN", "Köln, Löwchen", newArrayList("en"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
 
-		assertEquals(2, descriptionService.findDescriptionsWithAggregations("MAIN", "Ménière", newHashSet("en"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
-		assertEquals(2, descriptionService.findDescriptionsWithAggregations("MAIN", "Meniere", newHashSet("en"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
+		assertEquals(2, descriptionService.findDescriptionsWithAggregations("MAIN", "Ménière", newArrayList("en"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
+		assertEquals(2, descriptionService.findDescriptionsWithAggregations("MAIN", "Meniere", newArrayList("en"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
 
-		assertEquals(1, descriptionService.findDescriptionsWithAggregations("MAIN", "Alzheimer's", newHashSet("en"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
+		assertEquals(1, descriptionService.findDescriptionsWithAggregations("MAIN", "Alzheimer's", newArrayList("en"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
 
-		assertEquals(1, descriptionService.findDescriptionsWithAggregations("MAIN", "phospho-2-dehydro-3-deoxygluconate aldolase", newHashSet("en"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
-		assertEquals(1, descriptionService.findDescriptionsWithAggregations("MAIN", "Salmonella II 43:g,t:[1,5] (organism)", newHashSet("en"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
-		assertEquals(1, descriptionService.findDescriptionsWithAggregations("MAIN", "lidocaine hydrochloride 1.5%/epinephrine 1:200,000 injection solution vial (product)", newHashSet("en"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
-		assertEquals(1, descriptionService.findDescriptionsWithAggregations("MAIN", "pT3: tumor invades adventitia (esophagus)", newHashSet("en"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
-		assertEquals(1, descriptionService.findDescriptionsWithAggregations("MAIN", "Technetium Tc^99c^ medronate (substance)", newHashSet("en"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
+		assertEquals(1, descriptionService.findDescriptionsWithAggregations("MAIN", "phospho-2-dehydro-3-deoxygluconate aldolase", newArrayList("en"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
+		assertEquals(1, descriptionService.findDescriptionsWithAggregations("MAIN", "Salmonella II 43:g,t:[1,5] (organism)", newArrayList("en"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
+		assertEquals(1, descriptionService.findDescriptionsWithAggregations("MAIN", "lidocaine hydrochloride 1.5%/epinephrine 1:200,000 injection solution vial (product)", newArrayList("en"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
+		assertEquals(1, descriptionService.findDescriptionsWithAggregations("MAIN", "pT3: tumor invades adventitia (esophagus)", newArrayList("en"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
+		assertEquals(1, descriptionService.findDescriptionsWithAggregations("MAIN", "Technetium Tc^99c^ medronate (substance)", newArrayList("en"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
 
-		assertEquals(1, descriptionService.findDescriptionsWithAggregations("MAIN", "Minnesota pig #1", newHashSet("en"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
-		assertEquals(2, descriptionService.findDescriptionsWithAggregations("MAIN", "Lidocaine hydrochloride 1.5%/epinephrine", newHashSet("en"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
-		assertEquals(1, descriptionService.findDescriptionsWithAggregations("MAIN", "Hypodermic needles & syringes", newHashSet("en"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
+		assertEquals(1, descriptionService.findDescriptionsWithAggregations("MAIN", "Minnesota pig #1", newArrayList("en"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
+		assertEquals(2, descriptionService.findDescriptionsWithAggregations("MAIN", "Lidocaine hydrochloride 1.5%/epinephrine", newArrayList("en"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
+		assertEquals(1, descriptionService.findDescriptionsWithAggregations("MAIN", "Hypodermic needles & syringes", newArrayList("en"), ServiceTestUtil.PAGE_REQUEST).getTotalElements());
 	}
 
 	@Test
-	public void testDescriptionSearchAggregations() throws ServiceException {
+	void testDescriptionSearchAggregations() throws ServiceException {
 		String path = "MAIN";
 		Concept root = new Concept(SNOMEDCT_ROOT);
 		Concept pizza_2 = new Concept("100002").addRelationship(new Relationship(ISA, SNOMEDCT_ROOT)).addFSN("Food (food)");
 		Concept cheesePizza_3 = new Concept("100003").addRelationship(new Relationship(ISA, pizza_2.getId())).addFSN("Cheese Pizza (pizza)");
 		Concept reallyCheesyPizza_4 = new Concept("100004").addRelationship(new Relationship(ISA, cheesePizza_3.getId())).addFSN("Really Cheesy Pizza (pizza)");
 		Concept reallyCheesyPizza_5 = new Concept("100005").addRelationship(new Relationship(ISA, reallyCheesyPizza_4.getId())).addFSN("So Cheesy Pizza (so pizza)");
-		List<Concept> concepts = Lists.newArrayList(root, pizza_2, cheesePizza_3, reallyCheesyPizza_4, reallyCheesyPizza_5);
+		List<Concept> concepts = newArrayList(root, pizza_2, cheesePizza_3, reallyCheesyPizza_4, reallyCheesyPizza_5);
 		setModulesAndLanguage(concepts);
 		conceptService.batchCreate(concepts, path);
 
@@ -231,7 +247,13 @@ public class DescriptionServiceTest extends AbstractTest {
 		assertEquals("{pizza=2, so pizza=1}", getAggregationString("semanticTags", pizzaAggs));
 		assertEquals("{723592007=1, 723589008=2}", getAggregationString("membership", pizzaAggs));
 
-		page = descriptionService.findDescriptionsWithAggregations(path, "pizza", Sets.newHashSet("en"), true, null, "so pizza", true, null, false, null, PageRequest.of(0, 10));
+		page = descriptionService.findDescriptionsWithAggregations(path,
+				new DescriptionCriteria()
+						.term("pizza")
+						.active(true)
+						.semanticTag("so pizza")
+						.conceptActive(true),
+				PageRequest.of(0, 10));
 		assertEquals(1, page.getTotalElements());
 		assertEquals(1, page.getContent().size());
 		Map<String, Map<String, Long>> soPizzaAggs = page.getBuckets();
@@ -242,53 +264,60 @@ public class DescriptionServiceTest extends AbstractTest {
 	}
 
 	@Test
-	public void testDescriptionSearchGroupByConcept() throws ServiceException {
+	void testDescriptionSearchGroupByConcept() throws ServiceException {
 		String path = "MAIN";
 		Concept root = new Concept(SNOMEDCT_ROOT);
 		Concept pizza_2 = new Concept("100002").addRelationship(new Relationship(ISA, SNOMEDCT_ROOT)).addFSN("Food (food)");
 		Concept cheesePizza_3 = new Concept("100003").addRelationship(new Relationship(ISA, pizza_2.getId())).addFSN("Cheese Pizza (pizza)").addDescription(new Description("Cheese"));
 		Concept reallyCheesyPizza_4 = new Concept("100004").addRelationship(new Relationship(ISA, cheesePizza_3.getId())).addFSN("Really Cheesy Pizza (pizza)");
 		Concept reallyCheesyPizza_5 = new Concept("100005").addRelationship(new Relationship(ISA, reallyCheesyPizza_4.getId())).addFSN("So Cheesy Pizza (pizza)");
-		List<Concept> concepts = Lists.newArrayList(root, pizza_2, cheesePizza_3, reallyCheesyPizza_4, reallyCheesyPizza_5);
+		List<Concept> concepts = newArrayList(root, pizza_2, cheesePizza_3, reallyCheesyPizza_4, reallyCheesyPizza_5);
 		conceptService.batchCreate(concepts, path);
 
-		boolean groupByConcept = false;
-		assertEquals(2, descriptionService.findDescriptionsWithAggregations(path, "Cheese", Collections.singleton("en"), null, null, null, null, null, groupByConcept, null, PageRequest.of(0, 10)).getTotalElements());
-		groupByConcept = true;
-		assertEquals(1, descriptionService.findDescriptionsWithAggregations(path, "Cheese", Collections.singleton("en"), null, null, null, null, null, groupByConcept, null, PageRequest.of(0, 10)).getTotalElements());
+		DescriptionCriteria descriptionCriteria = new DescriptionCriteria()
+				.term("Cheese")
+				.groupByConcept(false);
+		assertEquals(2, descriptionService.findDescriptionsWithAggregations(path, descriptionCriteria, PageRequest.of(0, 10)).getTotalElements());
+
+		descriptionCriteria.groupByConcept(true);
+		assertEquals(1, descriptionService.findDescriptionsWithAggregations(path, descriptionCriteria, PageRequest.of(0, 10)).getTotalElements());
 	}
 
 	@Test
-	public void testDescriptionSearchWithRegex() throws ServiceException {
+	void testDescriptionSearchWithRegex() throws ServiceException {
 		String path = "MAIN";
 		Concept root = new Concept(SNOMEDCT_ROOT);
 		Concept pizza_2 = new Concept("100002").addRelationship(new Relationship(ISA, SNOMEDCT_ROOT)).addFSN("Food (food)");
 		Concept cheesePizza_3 = new Concept("100003").addRelationship(new Relationship(ISA, pizza_2.getId())).addFSN("Cheese Pizza (pizza)").addDescription(new Description("Cheese"));
 		Concept reallyCheesyPizza_4 = new Concept("100004").addRelationship(new Relationship(ISA, cheesePizza_3.getId())).addFSN("Really Cheesy Pizza (pizza)");
 		Concept reallyCheesyPizza_5 = new Concept("100005").addRelationship(new Relationship(ISA, reallyCheesyPizza_4.getId())).addFSN("So Cheesy Pizza (pizza)");
-		List<Concept> concepts = Lists.newArrayList(root, pizza_2, cheesePizza_3, reallyCheesyPizza_4, reallyCheesyPizza_5);
+		List<Concept> concepts = newArrayList(root, pizza_2, cheesePizza_3, reallyCheesyPizza_4, reallyCheesyPizza_5);
 		conceptService.batchCreate(concepts, path);
 
-		boolean groupByConcept = false;
-		assertEquals(2, descriptionService.findDescriptionsWithAggregations(path, "Cheese.*", Collections.singleton("en"), null, null, null, null, null, groupByConcept, REGEX, PageRequest.of(0, 10)).getTotalElements());
-		assertEquals(2, descriptionService.findDescriptionsWithAggregations(path, "Che{2}se.*", Collections.singleton("en"), null, null, null, null, null, groupByConcept, REGEX, PageRequest.of(0, 10)).getTotalElements());
-		assertEquals(1, descriptionService.findDescriptionsWithAggregations(path, "^Cheese$", Collections.singleton("en"), null, null, null, null, null, groupByConcept, REGEX, PageRequest.of(0, 10)).getTotalElements());
-		assertEquals(2, descriptionService.findDescriptionsWithAggregations(path, "Chees.*", Collections.singleton("en"), null, null, null, null, null, groupByConcept, REGEX, PageRequest.of(0, 10)).getTotalElements());
-		assertEquals(1, descriptionService.findDescriptionsWithAggregations(path, "Chees.*piz.*", Collections.singleton("en"), null, null, null, null, null, groupByConcept, REGEX, PageRequest.of(0, 10)).getTotalElements());
+		DescriptionCriteria descriptionCriteria = new DescriptionCriteria()
+				.searchMode(REGEX)
+				.groupByConcept(false);
 
-		groupByConcept = true;
-		assertEquals(1, descriptionService.findDescriptionsWithAggregations(path, "Chees.*", Collections.singleton("en"), null, null, null, null, null, groupByConcept, REGEX, PageRequest.of(0, 10)).getTotalElements());
+		assertEquals(2, descriptionService.findDescriptionsWithAggregations(path, descriptionCriteria.term("Cheese.*"), PageRequest.of(0, 10)).getTotalElements());
+		assertEquals(2, descriptionService.findDescriptionsWithAggregations(path, descriptionCriteria.term("Che{2}se.*"), PageRequest.of(0, 10)).getTotalElements());
+		assertEquals(1, descriptionService.findDescriptionsWithAggregations(path, descriptionCriteria.term("^Cheese$"), PageRequest.of(0, 10)).getTotalElements());
+		assertEquals(2, descriptionService.findDescriptionsWithAggregations(path, descriptionCriteria.term("Chees.*"), PageRequest.of(0, 10)).getTotalElements());
+		assertEquals(1, descriptionService.findDescriptionsWithAggregations(path, descriptionCriteria.term("Chees.*piz.*"), PageRequest.of(0, 10)).getTotalElements());
+
+		descriptionCriteria.groupByConcept(true);
+		assertEquals(1, descriptionService.findDescriptionsWithAggregations(path, descriptionCriteria.term("Chees.*"), PageRequest.of(0, 10)).getTotalElements());
 	}
 
 	@Test
-	public void testDescriptionSearchAggregationsSemanticTagFilter() throws ServiceException {
+	void testDescriptionSearchAggregationsSemanticTagFilter() throws ServiceException {
 		String path = "MAIN";
 		Concept root = new Concept(SNOMEDCT_ROOT);
-		Concept pizza_2 = new Concept("100002").addRelationship(new Relationship(ISA, SNOMEDCT_ROOT)).addFSN("Food (food)");
-		Concept cheesePizza_3 = new Concept("100003").addRelationship(new Relationship(ISA, pizza_2.getId())).addFSN("Cheese Pizza (pizza)");
+		Concept food_1 = new Concept("100002").addRelationship(new Relationship(ISA, SNOMEDCT_ROOT)).addFSN("Food (food)");
+		Concept food_2 = new Concept("100006").addRelationship(new Relationship(ISA, SNOMEDCT_ROOT)).addFSN("Food 2 (food)");
+		Concept cheesePizza_3 = new Concept("100003").addRelationship(new Relationship(ISA, food_1.getId())).addFSN("Cheese Pizza (pizza)");
 		Concept reallyCheesyPizza_4 = new Concept("100004").addRelationship(new Relationship(ISA, cheesePizza_3.getId())).addFSN("Really Cheesy Pizza (pizza)");
 		Concept reallyCheesyPizza_5 = new Concept("100005").addRelationship(new Relationship(ISA, reallyCheesyPizza_4.getId())).addFSN("So Cheesy Pizza (pizza)");
-		List<Concept> concepts = Lists.newArrayList(root, pizza_2, cheesePizza_3, reallyCheesyPizza_4, reallyCheesyPizza_5);
+		List<Concept> concepts = newArrayList(root, food_1, food_2, cheesePizza_3, reallyCheesyPizza_4, reallyCheesyPizza_5);
 		setModulesAndLanguage(concepts);
 		conceptService.batchCreate(concepts, path);
 
@@ -298,31 +327,42 @@ public class DescriptionServiceTest extends AbstractTest {
 				new ReferenceSetMember(Concepts.CORE_MODULE, Concepts.REFSET_MRCM_ATTRIBUTE_RANGE, "100005")
 		));
 
-		List<String> languageCodes = ControllerHelper.getLanguageCodes("en");
-		Map<String, Map<String, Long>> allAggregations = descriptionService.findDescriptionsWithAggregations(path, null, languageCodes, true, null, null, null, null, false, null, PageRequest.of(0, 10)).getBuckets();
-		assertEquals("{900000000000207008=4}", getAggregationString("module", allAggregations));
-		assertEquals("{en=4}", getAggregationString("language", allAggregations));
-		assertEquals("{pizza=3, food=1}", getAggregationString("semanticTags", allAggregations));
+		DescriptionCriteria descriptionCriteria = new DescriptionCriteria().active(true);
+		Map<String, Map<String, Long>> allAggregations = descriptionService.findDescriptionsWithAggregations(path, descriptionCriteria, PageRequest.of(0, 10)).getBuckets();
+		assertEquals("{900000000000207008=5}", getAggregationString("module", allAggregations));
+		assertEquals("{en=5}", getAggregationString("language", allAggregations));
+		assertEquals("{pizza=3, food=2}", getAggregationString("semanticTags", allAggregations));
 		assertEquals("{723592007=1, 723589008=2}", getAggregationString("membership", allAggregations));
 
-		String semanticTag = "pizza";
-		Map<String, Map<String, Long>> pizzaFilteredAggregations = descriptionService.findDescriptionsWithAggregations(path, null, languageCodes, true, null, semanticTag, null, null, false, null, PageRequest.of(0, 10)).getBuckets();
+		descriptionCriteria.semanticTag("pizza");
+		Map<String, Map<String, Long>> pizzaFilteredAggregations = descriptionService.findDescriptionsWithAggregations(path, descriptionCriteria, PageRequest.of(0, 10)).getBuckets();
 		assertEquals("{900000000000207008=3}", getAggregationString("module", pizzaFilteredAggregations));
 		assertEquals("{en=3}", getAggregationString("language", pizzaFilteredAggregations));
 		assertEquals("{pizza=3}", getAggregationString("semanticTags", pizzaFilteredAggregations));
 		assertEquals("{723592007=1, 723589008=2}", getAggregationString("membership", pizzaFilteredAggregations));
+
+		descriptionCriteria.semanticTag(null);
+		Set<String> semanticTags = new HashSet<>();
+		semanticTags.add("food");
+		semanticTags.add("pizza");
+		descriptionCriteria.semanticTags(semanticTags);
+		Map<String, Map<String, Long>> multipleSemanticTagsFilteredAggregations = descriptionService.findDescriptionsWithAggregations(path, descriptionCriteria, PageRequest.of(0, 10)).getBuckets();
+		assertEquals("{900000000000207008=5}", getAggregationString("module", multipleSemanticTagsFilteredAggregations));
+		assertEquals("{en=5}", getAggregationString("language", multipleSemanticTagsFilteredAggregations));
+		assertEquals("{pizza=3, food=2}", getAggregationString("semanticTags", multipleSemanticTagsFilteredAggregations));
+		assertEquals("{723592007=1, 723589008=2}", getAggregationString("membership", multipleSemanticTagsFilteredAggregations));
+
 	}
 
 	@Test
-	public void testDescriptionSearchAggregationsActiveConcept() throws ServiceException {
-		List<String> languageCodes = ControllerHelper.getLanguageCodes("en");
+	void testDescriptionSearchAggregationsActiveConcept() throws ServiceException {
 		String path = "MAIN";
 		Concept root = new Concept(SNOMEDCT_ROOT);
 		Concept pizza_2 = new Concept("100002").addRelationship(new Relationship(ISA, SNOMEDCT_ROOT)).addFSN("Food (food)");
 		Concept cheesePizza_3 = new Concept("100003").addRelationship(new Relationship(ISA, pizza_2.getId())).addFSN("Cheese Pizza (pizza)");
 		Concept reallyCheesyPizza_4 = new Concept("100004").addRelationship(new Relationship(ISA, cheesePizza_3.getId())).addFSN("Really Cheesy Pizza (pizza)");
 		Concept reallyCheesyPizza_5 = new Concept("100005").addRelationship(new Relationship(ISA, reallyCheesyPizza_4.getId())).addFSN("So Cheesy Pizza (pizza)");
-		List<Concept> concepts = Lists.newArrayList(root, pizza_2, cheesePizza_3, reallyCheesyPizza_4, reallyCheesyPizza_5);
+		List<Concept> concepts = newArrayList(root, pizza_2, cheesePizza_3, reallyCheesyPizza_4, reallyCheesyPizza_5);
 		setModulesAndLanguage(concepts);
 		conceptService.batchCreate(concepts, path);
 
@@ -333,25 +373,29 @@ public class DescriptionServiceTest extends AbstractTest {
 		Concept concept = conceptService.find(reallyCheesyPizza_5.getId(), path);
 		assertFalse(concept.isActive());
 
-		Boolean conceptActive = null;
-		assertEquals("Should find all three pizza concepts", 3, descriptionService.findDescriptionsWithAggregations(path, "pizza", languageCodes, true, null, null, conceptActive, null, false, null, PageRequest.of(0, 10)).getTotalElements());
+		DescriptionCriteria descriptionCriteria = new DescriptionCriteria()
+				.active(true)
+				.term("pizza");
 
-		conceptActive = true;
-		assertEquals("Should find the two active pizza concepts", 2, descriptionService.findDescriptionsWithAggregations(path, "pizza", languageCodes, true, null, null, conceptActive, null, false, null, PageRequest.of(0, 10)).getTotalElements());
+		descriptionCriteria.conceptActive(null);
+		assertEquals("Should find all three pizza concepts", 3, descriptionService.findDescriptionsWithAggregations(path, descriptionCriteria, PageRequest.of(0, 10)).getTotalElements());
 
-		conceptActive = false;
-		assertEquals("Should find the one inactive pizza concept", 1, descriptionService.findDescriptionsWithAggregations(path, "pizza", languageCodes, true, null, null, conceptActive, null, false, null, PageRequest.of(0, 10)).getTotalElements());
+		descriptionCriteria.conceptActive(true);
+		assertEquals("Should find the two active pizza concepts", 2, descriptionService.findDescriptionsWithAggregations(path, descriptionCriteria, PageRequest.of(0, 10)).getTotalElements());
+
+		descriptionCriteria.conceptActive(false);
+		assertEquals("Should find the one inactive pizza concept", 1, descriptionService.findDescriptionsWithAggregations(path, descriptionCriteria, PageRequest.of(0, 10)).getTotalElements());
 	}
 
 	@Test
-	public void testDescriptionSearchAggregationsRefsetFilter() throws ServiceException {
+	void testDescriptionSearchAggregationsRefsetFilter() throws ServiceException {
 		String path = "MAIN";
 		Concept root = new Concept(SNOMEDCT_ROOT);
 		Concept pizza_2 = new Concept("100002").addRelationship(new Relationship(ISA, SNOMEDCT_ROOT)).addFSN("Food (food)");
 		Concept cheesePizza_3 = new Concept("100003").addRelationship(new Relationship(ISA, pizza_2.getId())).addFSN("Cheese Pizza (pizza)");
 		Concept reallyCheesyPizza_4 = new Concept("100004").addRelationship(new Relationship(ISA, cheesePizza_3.getId())).addFSN("Really Cheesy Pizza (pizza)");
 		Concept reallyCheesyPizza_5 = new Concept("100005").addRelationship(new Relationship(ISA, reallyCheesyPizza_4.getId())).addFSN("So Cheesy Pizza (so pizza)");
-		List<Concept> concepts = Lists.newArrayList(root, pizza_2, cheesePizza_3, reallyCheesyPizza_4, reallyCheesyPizza_5);
+		List<Concept> concepts = newArrayList(root, pizza_2, cheesePizza_3, reallyCheesyPizza_4, reallyCheesyPizza_5);
 		setModulesAndLanguage(concepts);
 		conceptService.batchCreate(concepts, path);
 
@@ -361,17 +405,120 @@ public class DescriptionServiceTest extends AbstractTest {
 				new ReferenceSetMember(Concepts.CORE_MODULE, Concepts.REFSET_MRCM_ATTRIBUTE_RANGE, "100005")
 		));
 
-		String conceptRefset = null;
-		assertEquals(3, descriptionService.findDescriptionsWithAggregations(path, "pizza", Sets.newHashSet("en"), true, null, null, true, conceptRefset, false, null,
-				PageRequest.of(0, 10)).getTotalElements());
+		DescriptionCriteria descriptionCriteria = new DescriptionCriteria()
+				.active(true)
+				.term("pizza")
+				.conceptActive(true);
 
-		conceptRefset = Concepts.REFSET_MRCM_ATTRIBUTE_RANGE;
-		assertEquals(1, descriptionService.findDescriptionsWithAggregations(path, "pizza", Sets.newHashSet("en"), true, null, null, true, conceptRefset, false, null,
-				PageRequest.of(0, 10)).getTotalElements());
+		descriptionCriteria.conceptRefset(null);
+		assertEquals(3, descriptionService.findDescriptionsWithAggregations(path, descriptionCriteria, PageRequest.of(0, 10)).getTotalElements());
+
+		descriptionCriteria.conceptRefset(Concepts.REFSET_MRCM_ATTRIBUTE_RANGE);
+		assertEquals(1, descriptionService.findDescriptionsWithAggregations(path, descriptionCriteria, PageRequest.of(0, 10)).getTotalElements());
 	}
 
 	@Test
-	public void testVersionControlOnChildOfMainBranch() throws ServiceException {
+	void testDescriptionSearchTypeFilter() throws ServiceException {
+		String path = "MAIN";
+		Concept root = new Concept(SNOMEDCT_ROOT);
+		Concept pizza_2 = new Concept("100002").addRelationship(new Relationship(ISA, SNOMEDCT_ROOT)).addFSN("Food (food)");
+		Concept cheesePizza_3 = new Concept("100003").addRelationship(new Relationship(ISA, pizza_2.getId())).addFSN("Cheese Pizza (pizza)");
+		Concept reallyCheesyPizza_4 = new Concept("100004").addRelationship(new Relationship(ISA, cheesePizza_3.getId())).addFSN("Really Cheesy Pizza (pizza)");
+		Concept reallyCheesyPizza_5 = new Concept("100005").addRelationship(new Relationship(ISA, reallyCheesyPizza_4.getId())).addFSN("So Cheesy Pizza (so pizza)")
+				.addDescription(new Description("So cheesy pizza synonym"));
+		List<Concept> concepts = newArrayList(root, pizza_2, cheesePizza_3, reallyCheesyPizza_4, reallyCheesyPizza_5);
+		setModulesAndLanguage(concepts);
+		conceptService.batchCreate(concepts, path);
+
+		DescriptionCriteria descriptionCriteria = new DescriptionCriteria()
+				.active(true)
+				.term("pizza");
+		assertEquals(4, descriptionService.findDescriptionsWithAggregations(path, descriptionCriteria, PageRequest.of(0, 10)).getTotalElements());
+
+		descriptionCriteria.type(Collections.singleton(parseLong(Concepts.FSN)));
+		assertEquals(3, descriptionService.findDescriptionsWithAggregations(path, descriptionCriteria, PageRequest.of(0, 10)).getTotalElements());
+
+		descriptionCriteria.type(Collections.singleton(parseLong(Concepts.SYNONYM)));
+		assertEquals(1, descriptionService.findDescriptionsWithAggregations(path, descriptionCriteria, PageRequest.of(0, 10)).getTotalElements());
+
+		descriptionCriteria.type(Collections.singleton(parseLong(Concepts.TEXT_DEFINITION)));
+		assertEquals(0, descriptionService.findDescriptionsWithAggregations(path, descriptionCriteria, PageRequest.of(0, 10)).getTotalElements());
+
+		descriptionCriteria.type(newArrayList(parseLong(FSN), parseLong(SYNONYM)));
+		assertEquals(4, descriptionService.findDescriptionsWithAggregations(path, descriptionCriteria, PageRequest.of(0, 10)).getTotalElements());
+	}
+
+	@Test
+	void testDescriptionSearchAcceptabilityFilter() throws ServiceException {
+		String path = "MAIN";
+		Concept root = new Concept(SNOMEDCT_ROOT);
+		Concept pizza_2 = new Concept("100002").addRelationship(new Relationship(ISA, SNOMEDCT_ROOT))
+				.addDescription(new Description("Food (food)").addLanguageRefsetMember(GB_EN_LANG_REFSET, PREFERRED));
+		Concept cheesePizza_3 = new Concept("100003").addRelationship(new Relationship(ISA, pizza_2.getId()))
+				.addDescription(new Description("Cheese Pizza (pizza)").setTypeId(FSN).addLanguageRefsetMember(GB_EN_LANG_REFSET, PREFERRED))
+				.addDescription(new Description("Cheese Pizza").addLanguageRefsetMember(GB_EN_LANG_REFSET, PREFERRED))
+				.addDescription(new Description("Cheese").addLanguageRefsetMember(GB_EN_LANG_REFSET, ACCEPTABLE))
+				.addDescription(new Description("Cheeze Pizza").addLanguageRefsetMember(GB_EN_LANG_REFSET, ACCEPTABLE))
+				.addDescription(new Description("Cheezze Pizza").addLanguageRefsetMember(US_EN_LANG_REFSET, ACCEPTABLE));
+
+		Concept reallyCheesyPizza_4 = new Concept("100004").addRelationship(new Relationship(ISA, cheesePizza_3.getId()))
+				.addFSN("Really Cheesy Pizza (pizza)")
+				.addDescription(new Description("Really Cheesy Pizza").addLanguageRefsetMember(GB_EN_LANG_REFSET, PREFERRED));
+
+		Concept reallyCheesyPizza_5 = new Concept("100005").addRelationship(new Relationship(ISA, reallyCheesyPizza_4.getId())).addFSN("So Cheesy Pizza (so pizza)")
+				.addDescription(new Description("So cheesy pizza synonym"));
+		List<Concept> concepts = newArrayList(root, pizza_2, cheesePizza_3, reallyCheesyPizza_4, reallyCheesyPizza_5);
+		setModulesAndLanguage(concepts);
+		conceptService.batchCreate(concepts, path);
+
+		DescriptionCriteria descriptionCriteria = new DescriptionCriteria()
+				.active(true)
+				.term("pizza");
+		assertEquals(8, descriptionService.findDescriptionsWithAggregations(path, descriptionCriteria, PageRequest.of(0, 10)).getTotalElements());
+
+		descriptionCriteria.type(Collections.singleton(parseLong(Concepts.FSN)));
+		assertEquals(3, descriptionService.findDescriptionsWithAggregations(path, descriptionCriteria, PageRequest.of(0, 10)).getTotalElements());
+
+		descriptionCriteria.preferredIn(Collections.singleton(parseLong(GB_EN_LANG_REFSET)));
+		assertEquals(1, descriptionService.findDescriptionsWithAggregations(path, descriptionCriteria, PageRequest.of(0, 10)).getTotalElements());
+
+		descriptionCriteria
+				.term("Cheese")
+				.type(Collections.singleton(parseLong(Concepts.SYNONYM)))
+				.preferredIn(Collections.singleton(parseLong(GB_EN_LANG_REFSET)));
+		assertEquals(1, descriptionService.findDescriptionsWithAggregations(path, descriptionCriteria, PageRequest.of(0, 10)).getTotalElements());
+		descriptionCriteria.preferredIn(null);
+
+		descriptionCriteria
+				.term("Cheeze")
+				.type(Collections.singleton(parseLong(Concepts.SYNONYM)))
+				.preferredIn(Collections.singleton(parseLong(GB_EN_LANG_REFSET)));
+		assertEquals(0, descriptionService.findDescriptionsWithAggregations(path, descriptionCriteria, PageRequest.of(0, 10)).getTotalElements());
+		descriptionCriteria.preferredIn(null);
+
+		descriptionCriteria
+				.term("Cheeze")
+				.type(Collections.singleton(parseLong(Concepts.SYNONYM)))
+				.acceptableIn(Collections.singleton(parseLong(GB_EN_LANG_REFSET)));
+		assertEquals(1, descriptionService.findDescriptionsWithAggregations(path, descriptionCriteria, PageRequest.of(0, 10)).getTotalElements());
+		descriptionCriteria.acceptableIn(null);
+
+		descriptionCriteria
+				.term("Cheezze")
+				.type(Collections.singleton(parseLong(Concepts.SYNONYM)))
+				.preferredIn(Collections.singleton(parseLong(US_EN_LANG_REFSET)));
+		assertEquals(0, descriptionService.findDescriptionsWithAggregations(path, descriptionCriteria, PageRequest.of(0, 10)).getTotalElements());
+		descriptionCriteria.preferredIn(null);
+
+		descriptionCriteria
+				.term("Cheezze")
+				.type(Collections.singleton(parseLong(Concepts.SYNONYM)))
+				.preferredOrAcceptableIn(Collections.singleton(parseLong(US_EN_LANG_REFSET)));
+		assertEquals(1, descriptionService.findDescriptionsWithAggregations(path, descriptionCriteria, PageRequest.of(0, 10)).getTotalElements());
+	}
+
+	@Test
+	void testVersionControlOnChildOfMainBranch() throws ServiceException {
 		branchService.create("MAIN/A");
 		Concept concept = testUtil.createConceptWithPathIdAndTerm("MAIN/A", "100001", "Heart");
 
@@ -389,7 +536,7 @@ public class DescriptionServiceTest extends AbstractTest {
 	}
 
 	@Test
-	public void testVersionControlOnMainBranch() throws ServiceException {
+	void testVersionControlOnMainBranch() throws ServiceException {
 		Concept concept = testUtil.createConceptWithPathIdAndTerm("MAIN", "100001", "Heart");
 
 		assertEquals(Collections.emptySet(), branchService.findLatest("MAIN").getVersionsReplaced().get("Description"));
@@ -403,6 +550,28 @@ public class DescriptionServiceTest extends AbstractTest {
 		}
 
 		assertEquals(Collections.emptySet(), branchService.findLatest("MAIN").getVersionsReplaced().get("Description"));
+	}
+
+	@Test
+	void testDescriptionSearchMatchingWord() throws ServiceException {
+		String path = "MAIN";
+		Concept root = new Concept(SNOMEDCT_ROOT);
+		Concept concept_1 = new Concept("100002").addRelationship(new Relationship(ISA, SNOMEDCT_ROOT)).addFSN("Place (environment)");
+		Concept concept_2 = new Concept("100003").addRelationship(new Relationship(ISA, SNOMEDCT_ROOT)).addFSN("Placental structure (body structure)").addDescription(new Description("Placenta"));
+		Concept concept_3 = new Concept("100004").addRelationship(new Relationship(ISA, SNOMEDCT_ROOT)).addFSN("Place of accident (attribute)").addDescription(new Description("The origin place of accident"));
+		Concept concept_4 = new Concept("100005").addRelationship(new Relationship(ISA, SNOMEDCT_ROOT)).addFSN("Place of origin (observable entity)");
+		List<Concept> concepts = newArrayList(root, concept_1, concept_2, concept_3, concept_4);
+		conceptService.batchCreate(concepts, path);
+
+		DescriptionCriteria descriptionCriteria = new DescriptionCriteria()
+				.searchMode(WHOLE_WORD)
+				.groupByConcept(false);
+
+		assertEquals(4, descriptionService.findDescriptionsWithAggregations(path, descriptionCriteria.term("place"), PageRequest.of(0, 10)).getTotalElements());
+		assertEquals(4, descriptionService.findDescriptionsWithAggregations(path, descriptionCriteria.term("Place"), PageRequest.of(0, 10)).getTotalElements());
+		assertEquals(1, descriptionService.findDescriptionsWithAggregations(path, descriptionCriteria.term("Placenta"), PageRequest.of(0, 10)).getTotalElements());
+		assertEquals(2, descriptionService.findDescriptionsWithAggregations(path, descriptionCriteria.term("place origin"), PageRequest.of(0, 10)).getTotalElements());
+		assertEquals(2, descriptionService.findDescriptionsWithAggregations(path, descriptionCriteria.term("origin place"), PageRequest.of(0, 10)).getTotalElements());
 	}
 
 	private String getAggregationString(String name, Map<String, Map<String, Long>> buckets) {

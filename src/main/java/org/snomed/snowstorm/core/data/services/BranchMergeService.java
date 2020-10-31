@@ -6,26 +6,30 @@ import io.kaicode.elasticvc.domain.Branch;
 import io.kaicode.elasticvc.domain.Commit;
 import io.kaicode.elasticvc.domain.DomainEntity;
 import io.kaicode.elasticvc.domain.Entity;
+import io.kaicode.elasticvc.repositories.BranchRepository;
 import org.elasticsearch.index.query.BoolQueryBuilder;
 import org.elasticsearch.index.query.QueryBuilder;
+import org.elasticsearch.search.sort.FieldSortBuilder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.snomed.snowstorm.core.data.domain.*;
-import org.snomed.snowstorm.core.data.domain.review.BranchReview;
+import org.snomed.snowstorm.core.data.domain.review.MergeReview;
 import org.snomed.snowstorm.core.data.domain.review.ReviewStatus;
 import org.snomed.snowstorm.core.data.repositories.*;
 import org.snomed.snowstorm.core.data.services.pojo.IntegrityIssueReport;
 import org.snomed.snowstorm.rest.pojo.MergeRequest;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.data.elasticsearch.core.ElasticsearchOperations;
+import org.springframework.data.elasticsearch.core.SearchHit;
+import org.springframework.data.elasticsearch.core.SearchHitsIterator;
+import org.springframework.data.elasticsearch.core.query.NativeSearchQuery;
 import org.springframework.data.elasticsearch.core.query.NativeSearchQueryBuilder;
-import org.springframework.data.elasticsearch.repository.ElasticsearchCrudRepository;
-import org.springframework.data.util.CloseableIterator;
+import org.springframework.data.elasticsearch.repository.ElasticsearchRepository;
 import org.springframework.stereotype.Service;
 
 import java.util.*;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.stream.Collectors;
 
 import static io.kaicode.elasticvc.api.VersionControlHelper.LARGE_PAGE;
@@ -77,8 +81,15 @@ public class BranchMergeService {
 	@Autowired
 	private ReferenceSetMemberRepository referenceSetMemberRepository;
 
-	private final ExecutorService executorService = Executors.newCachedThreadPool();
-	private static final String USE_BRANCH_REVIEW = "The target branch is diverged, please use the branch review endpoint instead.";
+	@Autowired
+	private BranchRepository branchRepository;
+
+	private BranchReviewService branchReviewService;
+
+	@Autowired
+	private ExecutorService executorService;
+
+	private static final String USE_MERGE_REVIEW = "The target branch is diverged, please use the merge review endpoint instead.";
 	private static final Logger logger = LoggerFactory.getLogger(BranchMergeService.class);
 
 	public BranchMergeJob mergeBranchAsync(MergeRequest mergeRequest) {
@@ -90,16 +101,26 @@ public class BranchMergeService {
 					"Please use the code system upgrade operation for this.");
 		}
 
-		BranchReview branchReview = null;
+		MergeReview mergeReview;
 		if (mergeRequest.getReviewId() != null) {
-			branchReview = checkBranchReview(mergeRequest, source, target);
+			mergeReview = checkMergeReviewCurrent(mergeRequest.getReviewId());
+
+			if (!mergeReview.getSourcePath().equals(source)
+					|| !mergeReview.getTargetPath().equals(target)) {
+				throw new IllegalArgumentException("The source and target branches of the specified merge review do not match the " +
+						"source and target branches of this merge.");
+			}
+		} else {
+			mergeReview = null;
 		}
 
-		// TODO: The current production authoring platform currently does not pass the review id through
-//		final Branch targetBranch = branchService.findBranchOrThrow(target);
-//		if (targetBranch.getState() == Branch.BranchState.DIVERGED && branchReview == null) {
-//			throw new IllegalArgumentException(USE_BRANCH_REVIEW);
-//		}
+		// Rebase
+		if (source.equals(PathUtil.getParentPath(target))) {
+			final Branch targetBranch = branchService.findBranchOrThrow(target);
+			if (targetBranch.getState() == Branch.BranchState.DIVERGED && mergeReview == null) {
+				throw new IllegalArgumentException(USE_MERGE_REVIEW);
+			}
+		}
 
 		BranchMergeJob mergeJob = new BranchMergeJob(source, target, JobStatus.SCHEDULED);
 		branchMergeJobRepository.save(mergeJob);
@@ -108,7 +129,11 @@ public class BranchMergeService {
 		branchMergeJobRepository.save(mergeJob);
 		executorService.submit(() -> {
 			try {
-				mergeBranchSync(source, target, null);
+				if (mergeReview != null) {
+					branchReviewService.applyMergeReview(mergeReview);
+				} else {
+					mergeBranchSync(source, target, null);
+				}
 				mergeJob.setStatus(JobStatus.COMPLETED);
 				mergeJob.setEndDate(new Date());
 				branchMergeJobRepository.save(mergeJob);
@@ -132,10 +157,6 @@ public class BranchMergeService {
 		return branchMergeJobRepository.findById(id).orElseThrow(() -> new NotFoundException("Branch merge job not found."));
 	}
 
-	public void mergeBranchSync(String source, String target, Collection<Concept> manuallyMergedConcepts) throws ServiceException {
-		mergeBranchSync(source, target, manuallyMergedConcepts, false);
-	}
-
 	/**
 	 * Merge content from one branch to another without one being a parent of the other.
 	 * This should probably only be used for code system upgrades/downgrades.
@@ -150,13 +171,13 @@ public class BranchMergeService {
 
 		try (Commit commit = branchService.openCommit(target, branchMetadataHelper.getBranchLockMetadata("Copying changes from " + source))) {
 			logger.info("Performing migration {} -> {}", source, target);
-			final Map<Class<? extends SnomedComponent>, ElasticsearchCrudRepository> componentTypeRepoMap = domainEntityConfiguration.getComponentTypeRepositoryMap();
+			final Map<Class<? extends SnomedComponent>, ElasticsearchRepository> componentTypeRepoMap = domainEntityConfiguration.getComponentTypeRepositoryMap();
 			componentTypeRepoMap.entrySet().parallelStream().forEach(entry -> copyChangesOnBranchToCommit(source, commit, entry.getKey(), entry.getValue(), "Migrating", false));
 			commit.markSuccessful();
 		}
 	}
 
-	void mergeBranchSync(String source, String target, Collection<Concept> manuallyMergedConcepts, boolean permissive) throws ServiceException {
+	public void mergeBranchSync(String source, String target, Collection<Concept> manuallyMergedConcepts) throws ServiceException {
 		logger.info("Request merge {} -> {}", source, target);
 		final Branch sourceBranch = branchService.findBranchOrThrow(source);
 		final Branch targetBranch = branchService.findBranchOrThrow(target);
@@ -170,17 +191,17 @@ public class BranchMergeService {
 		final boolean rebase = sourceBranch.isParent(targetBranch);
 		if (rebase) {
 			// Rebase
-			if (sourceBranch.getHeadTimestamp() == targetBranch.getBaseTimestamp() && !permissive) {
+			if (sourceBranch.getHeadTimestamp() == targetBranch.getBaseTimestamp()) {
 				throw new IllegalStateException("This rebase is not meaningful, the child branch already has the parent's changes.");
-			} else if (targetBranch.getState() == Branch.BranchState.DIVERGED && manuallyMergedConcepts == null && !permissive) {
-//				throw new IllegalArgumentException(USE_BRANCH_REVIEW); // TODO: The current production authoring platform currently does not pass the review id through
+			} else if (targetBranch.getState() == Branch.BranchState.DIVERGED && manuallyMergedConcepts == null) {
+				throw new IllegalArgumentException(USE_MERGE_REVIEW);
 			}
 		} else {
 			// Promotion
-			if (!sourceBranch.isContainsContent() && !permissive) {
+			if (!sourceBranch.isContainsContent()) {
 				throw new IllegalStateException("This promotion is not meaningful, the child branch does not have any unpromoted changes.");
 			}
-			if (sourceBranch.getBaseTimestamp() != targetBranch.getHeadTimestamp() && !permissive) {
+			if (sourceBranch.getBaseTimestamp() != targetBranch.getHeadTimestamp()) {
 				throw new IllegalStateException("Child branch must be rebased before promoted.");
 			}
 		}
@@ -242,7 +263,7 @@ public class BranchMergeService {
 
 				logger.info("Performing promotion {} -> {}", source, target);
 				final Map<String, Set<String>> versionsReplaced = sourceBranch.getVersionsReplaced();
-				final Map<Class<? extends DomainEntity>, ElasticsearchCrudRepository> componentTypeRepoMap = domainEntityConfiguration.getAllTypeRepositoryMap();
+				final Map<Class<? extends DomainEntity>, ElasticsearchRepository> componentTypeRepoMap = domainEntityConfiguration.getAllTypeRepositoryMap();
 				componentTypeRepoMap.entrySet().parallelStream().forEach(entry -> promoteEntities(source, commit, entry.getKey(), entry.getValue(), versionsReplaced));
 				commit.markSuccessful();
 			}
@@ -267,10 +288,8 @@ public class BranchMergeService {
 						.must(clause))
 				.withFields(idField)
 				.withPageable(LARGE_PAGE);
-		try (CloseableIterator<T> stream = elasticsearchTemplate.stream(changesQueryBuilder.build(), componentClass)) {
-			stream.forEachRemaining(component -> {
-				componentsChangedOnBranch.add(component.getId());
-			});
+		try (SearchHitsIterator<T> stream = elasticsearchTemplate.searchForStream(changesQueryBuilder.build(), componentClass)) {
+			stream.forEachRemaining(hit -> componentsChangedOnBranch.add(hit.getContent().getId()));
 		}
 
 		if (componentsChangedOnBranch.isEmpty()) {
@@ -287,15 +306,13 @@ public class BranchMergeService {
 				.withFilter(termsQuery(idField, componentsChangedOnBranch))
 				.withFields(idField)
 				.withPageable(LARGE_PAGE);
-		try (CloseableIterator<T> stream = elasticsearchTemplate.stream(parentQueryBuilder.build(), componentClass)) {
-			stream.forEachRemaining(component -> {
-				duplicateComponents.add(component.getId());
-			});
+		try (SearchHitsIterator<T> stream = elasticsearchTemplate.searchForStream(parentQueryBuilder.build(), componentClass)) {
+			stream.forEachRemaining(hit -> duplicateComponents.add(hit.getContent().getId()));
 		}
 
 		if (!duplicateComponents.isEmpty()) {
 			// Favor the version of the component which has already been promoted by ending the version on this branch.
-			ElasticsearchCrudRepository repository = domainEntityConfiguration.getComponentTypeRepositoryMap().get(componentClass);
+			ElasticsearchRepository repository = domainEntityConfiguration.getComponentTypeRepositoryMap().get(componentClass);
 			logger.info("Taking parent version of {} {}s on {}", duplicateComponents.size(), componentClass.getSimpleName(), path);
 			versionControlHelper.endOldVersionsOnThisBranch(componentClass, duplicateComponents, idField, clause, commit, repository);
 		}
@@ -310,82 +327,121 @@ public class BranchMergeService {
 		}
 		try (Commit commit = branchService.openRebaseToSpecificParentTimepointCommit(targetBranch, sourceTimepoint, branchMetadataHelper.getBranchLockMetadata(targetLockMessage))) {
 			BranchCriteria branchCriteriaIncludingOpenCommit = versionControlHelper.getBranchCriteriaIncludingOpenCommit(commit);
-			findAndEndDonatedComponentsOfAllTypes(targetBranch, branchCriteriaIncludingOpenCommit, new HashMap<>());
+			fixDuplicateComponents(targetBranch, branchCriteriaIncludingOpenCommit, true, new HashMap<>());
 			commit.markSuccessful();
 		}
 	}
 
-	void findAndEndDonatedComponentsOfAllTypes(String branch, BranchCriteria branchCriteria, Map<Class, Set<String>> fixesApplied) {
-		findAndEndDonatedComponents(branch, branchCriteria, Concept.class, Concept.Fields.CONCEPT_ID, conceptRepository, fixesApplied);
-		findAndEndDonatedComponents(branch, branchCriteria, Description.class, Description.Fields.DESCRIPTION_ID, descriptionRepository, fixesApplied);
-		findAndEndDonatedComponents(branch, branchCriteria, Relationship.class, Relationship.Fields.RELATIONSHIP_ID, relationshipRepository, fixesApplied);
-		findAndEndDonatedComponents(branch, branchCriteria, ReferenceSetMember.class, ReferenceSetMember.Fields.MEMBER_ID, referenceSetMemberRepository, fixesApplied);
+	void fixDuplicateComponents(String branch, BranchCriteria branchCriteria, boolean endThisVersion, Map<Class, Set<String>> fixesApplied) {
+		fixDuplicateComponentsOfType(branch, branchCriteria, Concept.class, Concept.Fields.CONCEPT_ID, conceptRepository, endThisVersion, fixesApplied);
+		fixDuplicateComponentsOfType(branch, branchCriteria, Description.class, Description.Fields.DESCRIPTION_ID, descriptionRepository, endThisVersion, fixesApplied);
+		fixDuplicateComponentsOfType(branch, branchCriteria, Relationship.class, Relationship.Fields.RELATIONSHIP_ID, relationshipRepository, endThisVersion, fixesApplied);
+		fixDuplicateComponentsOfType(branch, branchCriteria, ReferenceSetMember.class, ReferenceSetMember.Fields.MEMBER_ID, referenceSetMemberRepository, endThisVersion, fixesApplied);
 	}
 
-	private void findAndEndDonatedComponents(String branch, BranchCriteria branchCriteria, Class<? extends SnomedComponent> clazz, String idField, ElasticsearchCrudRepository repository, Map<Class, Set<String>> fixesApplied) {
+	private void fixDuplicateComponentsOfType(String branch, BranchCriteria branchCriteria, Class<? extends SnomedComponent> clazz, String idField,
+			ElasticsearchRepository repository, boolean endThisVersion, Map<Class, Set<String>> fixesApplied) {
+
 		logger.info("Searching for duplicate {} records on {}", clazz.getSimpleName(), branch);
 		BoolQueryBuilder entityBranchCriteria = branchCriteria.getEntityBranchCriteria(clazz);
 
 		// Find components on extension branch
 		Set<String> ids = new HashSet<>();
-		try (CloseableIterator<? extends SnomedComponent> conceptStream = elasticsearchTemplate.stream(new NativeSearchQueryBuilder()
+		try (SearchHitsIterator<? extends SnomedComponent> conceptStream = elasticsearchTemplate.searchForStream(new NativeSearchQueryBuilder()
 				.withQuery(boolQuery().must(entityBranchCriteria)
 						.must(termQuery("path", branch)))
 				.withPageable(ComponentService.LARGE_PAGE)
 				.withFields(idField).build(), clazz)) {
-			conceptStream.forEachRemaining(c -> ids.add(c.getId()));
+			conceptStream.forEachRemaining(c -> ids.add(c.getContent().getId()));
 		}
 
 		// Find donated components where the extension version is not ended
 		Set<String> duplicateIds = new HashSet<>();
-		try (CloseableIterator<? extends SnomedComponent> conceptStream = elasticsearchTemplate.stream(new NativeSearchQueryBuilder()
-				.withQuery(boolQuery().must(entityBranchCriteria)
-						.mustNot(termQuery("path", branch)))
-				.withFilter(termsQuery(idField, ids))
-				.withPageable(ComponentService.LARGE_PAGE)
-				.withFields(idField).build(), clazz)) {
-			conceptStream.forEachRemaining(c -> {
-				if(ids.contains(c.getId())) {
-					duplicateIds.add(c.getId());
-				}
-			});
+		for (List<String> idsBatch : Iterables.partition(ids, 10_000)) {
+			try (SearchHitsIterator<? extends SnomedComponent> conceptStream = elasticsearchTemplate.searchForStream(new NativeSearchQueryBuilder()
+					.withQuery(boolQuery().must(entityBranchCriteria)
+							.mustNot(termQuery("path", branch)))
+					.withFilter(termsQuery(idField, idsBatch))
+					.withPageable(ComponentService.LARGE_PAGE)
+					.withFields(idField).build(), clazz)) {
+				conceptStream.forEachRemaining(c -> {
+					if(ids.contains(c.getContent().getId())) {
+						duplicateIds.add(c.getContent().getId());
+					}
+				});
+			}
 		}
 
 		logger.info("Found {} duplicate {} records: {}", duplicateIds.size(), clazz.getSimpleName(), duplicateIds);
 
 		// End duplicate components using the commit timestamp of the donated content
-		for (String duplicateId : duplicateIds) {
-			List<? extends SnomedComponent> intVersionList = elasticsearchTemplate.queryForList(new NativeSearchQueryBuilder()
+		List<String> internalIdsToHide = new ArrayList<>();
+		for (List<String> duplicateIdsBatch : Iterables.partition(duplicateIds, 10_000)) {
+			List<? extends SnomedComponent> intVersions = elasticsearchTemplate.search(new NativeSearchQueryBuilder()
 					.withQuery(boolQuery().must(entityBranchCriteria)
-							.must(termQuery(idField, duplicateId))
+							.must(termsQuery(idField, duplicateIdsBatch))
 							.mustNot(termQuery("path", branch)))
-					.build(), clazz);
-			if (intVersionList.size() != 1) {
-				throw new IllegalStateException(String.format("During fix stage expecting 1 int version but found %s for id %s", intVersionList.size(), clazz));
-			}
-			SnomedComponent intVersion = intVersionList.get(0);
-			Date donatedVersionCommitTimepoint = intVersion.getStart();
+					.withPageable(LARGE_PAGE)
+					.build(), clazz)
+					.stream().map(SearchHit::getContent)
+					.collect(Collectors.toList());
 
-			List<? extends SnomedComponent> extensionVersionList = elasticsearchTemplate.queryForList(new NativeSearchQueryBuilder()
-					.withQuery(boolQuery().must(entityBranchCriteria)
-							.must(termQuery(idField, duplicateId))
-							.must(termQuery("path", branch)))
-					.build(), clazz);
-			if (extensionVersionList.size() != 1) {
-				throw new IllegalStateException(String.format("During fix stage expecting 1 extension version but found %s for id %s", extensionVersionList.size(), clazz));
-			}
-			SnomedComponent extensionVersion = extensionVersionList.get(0);
-			extensionVersion.setEnd(donatedVersionCommitTimepoint);
-			repository.save(extensionVersion);
-			logger.info("Ended {} on {} at timepoint {} to match {} version start date.", duplicateId, branch, donatedVersionCommitTimepoint, intVersion.getPath());
+			for (SnomedComponent intVersion : intVersions) {
+				if (endThisVersion) {
+					Date donatedVersionCommitTimepoint = intVersion.getStart();
 
-			fixesApplied.put(clazz, duplicateIds);
+					String duplicateId = intVersion.getId();
+					List<? extends SnomedComponent> extensionVersionList = elasticsearchTemplate.search(new NativeSearchQueryBuilder()
+							.withQuery(boolQuery().must(entityBranchCriteria)
+									.must(termQuery(idField, duplicateId))
+									.must(termQuery("path", branch)))
+							.build(), clazz)
+							.stream().map(SearchHit::getContent)
+							.collect(Collectors.toList());
+					if (extensionVersionList.size() != 1) {
+						throw new IllegalStateException(String.format("During fix stage expecting 1 extension version but found %s for id %s", extensionVersionList.size(), clazz));
+					}
+					SnomedComponent extensionVersion = extensionVersionList.get(0);
+					extensionVersion.setEnd(donatedVersionCommitTimepoint);
+					repository.save(extensionVersion);
+					logger.info("Ended {} on {} at timepoint {} to match {} version start date.", duplicateId, branch, donatedVersionCommitTimepoint, intVersion.getPath());
+				} else {
+					// Hide parent version
+					internalIdsToHide.add(intVersion.getInternalId());
+				}
+			}
 		}
+
+		if (!endThisVersion && !internalIdsToHide.isEmpty()) {
+			// Hide parent version using version replaced map on branch
+			Branch latestBranch = branchService.findLatest(branch);
+			latestBranch.addVersionsReplaced(Collections.singletonMap(clazz.getSimpleName(), new HashSet<>(internalIdsToHide)));
+			branchRepository.save(latestBranch);
+			logger.info("Updated branch with an additional {} {} versions to hide on ancestor branch.", internalIdsToHide.size(), clazz.getSimpleName());
+		}
+
+		fixesApplied.put(clazz, duplicateIds);
 	}
 
+	public List<Branch> findChildBranches(String path, boolean immediateChildren, PageRequest pageRequest) {
+		// If only immediate children then the path and everything else besides the "/" character (one level only)
+		// OR
+		// Matches the path and everything else
+		String regexp = immediateChildren ? path + "/" + "([^/]*){1}" : path + "/.*";
+
+		NativeSearchQuery build = new NativeSearchQueryBuilder()
+				.withQuery(boolQuery()
+						.mustNot(existsQuery("end"))
+						.must(regexpQuery("path", regexp))
+				)
+				.withSort(new FieldSortBuilder("path"))
+				.withPageable(pageRequest).build();
+
+		return elasticsearchTemplate.search(build, Branch.class).stream().map(SearchHit::getContent).collect(Collectors.toList());
+	}
 
 	private <T extends DomainEntity> void promoteEntities(String source, Commit commit, Class<T> entityClass,
-			ElasticsearchCrudRepository<T, String> entityRepository, Map<String, Set<String>> versionsReplaced) {
+			ElasticsearchRepository<T, String> entityRepository, Map<String, Set<String>> versionsReplaced) {
 
 		final String targetPath = commit.getBranch().getPath();
 
@@ -393,7 +449,7 @@ public class BranchMergeService {
 		List<T> toEnd = new ArrayList<>();
 		String entityClassName = entityClass.getSimpleName();
 		for (List<String> versionsReplacedSegment : Iterables.partition(versionsReplaced.getOrDefault(entityClassName, Collections.emptySet()), 1000)) {
-			try (final CloseableIterator<T> entitiesToEnd = elasticsearchTemplate.stream(new NativeSearchQueryBuilder()
+			try (final SearchHitsIterator<T> entitiesToEnd = elasticsearchTemplate.searchForStream(new NativeSearchQueryBuilder()
 					.withQuery(boolQuery()
 							.must(termQuery("path", targetPath))
 							.must(termsQuery("_id", versionsReplacedSegment))
@@ -402,8 +458,8 @@ public class BranchMergeService {
 					.build(), entityClass)) {
 
 				entitiesToEnd.forEachRemaining(entity -> {
-					if (entity.getEnd() == null) {
-						toEnd.add(entity);
+					if (entity.getContent().getEnd() == null) {
+						toEnd.add(entity.getContent());
 					}
 				});
 			}
@@ -424,16 +480,16 @@ public class BranchMergeService {
 	}
 
 	private <T extends DomainEntity> void copyChangesOnBranchToCommit(String source, Commit commit, Class<T> entityClass,
-			ElasticsearchCrudRepository<T, String> entityRepository, String logAction, boolean endEntitiesOnSource) {
+			ElasticsearchRepository<T, String> entityRepository, String logAction, boolean endEntitiesOnSource) {
 
 		// Load all entities on source
-		try (final CloseableIterator<T> entities = elasticsearchTemplate.stream(new NativeSearchQueryBuilder()
+		try (final SearchHitsIterator<T> entities = elasticsearchTemplate.searchForStream(new NativeSearchQueryBuilder()
 				.withQuery(versionControlHelper.getChangesOnBranchCriteria(source).getEntityBranchCriteria(entityClass))
 				.withPageable(ConceptService.LARGE_PAGE)
 				.build(), entityClass)) {
 
 			List<T> toPromote = new ArrayList<>();
-			entities.forEachRemaining(toPromote::add);
+			entities.forEachRemaining(hit -> toPromote.add(hit.getContent()));
 			if (toPromote.isEmpty()) {
 				return;
 			}
@@ -453,16 +509,16 @@ public class BranchMergeService {
 		}
 	}
 
-	private BranchReview checkBranchReview(MergeRequest mergeRequest, String sourceBranchPath, String targetBranchPath) {
-		BranchReview branchReview = reviewService.getBranchReviewOrThrow(mergeRequest.getReviewId());
-		if (!branchReview.getSource().getPath().equals(sourceBranchPath)
-				|| !branchReview.getTarget().getPath().equals(targetBranchPath)) {
-			throw new IllegalArgumentException("The source and target branches of the specified branch review do not match the " +
-					"source and target branches of this merge.");
+	private MergeReview checkMergeReviewCurrent(String mergeReviewId) {
+		MergeReview mergeReview = reviewService.getMergeReviewOrThrow(mergeReviewId);
+		if (mergeReview.getStatus() != ReviewStatus.CURRENT) {
+			throw new IllegalStateException("Merge review is not in CURRENT status.");
 		}
-		if (!branchReview.getStatus().equals(ReviewStatus.CURRENT)) {
-			throw new IllegalStateException("The specified branch review is not in CURRENT status.");
-		}
-		return branchReview;
+		return mergeReview;
 	}
+
+	public void setBranchReviewService(BranchReviewService branchReviewService) {
+		this.branchReviewService = branchReviewService;
+	}
+
 }

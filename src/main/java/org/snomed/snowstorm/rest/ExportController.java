@@ -21,7 +21,6 @@ public class ExportController {
 	private ExportService exportService;
 
 	@RequestMapping(method = RequestMethod.POST)
-	@ResponseBody
 	public ResponseEntity<Void> createExportJob(@Valid @RequestBody ExportRequestView exportConfiguration) {
 		String id = exportService.createJob(exportConfiguration);
 		return ControllerHelper.getCreatedResponse(id);

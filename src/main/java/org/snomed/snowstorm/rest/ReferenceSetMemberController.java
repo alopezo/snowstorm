@@ -9,6 +9,7 @@ import io.swagger.annotations.ApiOperation;
 import io.swagger.annotations.ApiParam;
 import org.apache.commons.lang3.SerializationUtils;
 import org.elasticsearch.common.util.set.Sets;
+import org.snomed.snowstorm.config.Config;
 import org.snomed.snowstorm.core.data.domain.ConceptMini;
 import org.snomed.snowstorm.core.data.domain.ReferenceSetMember;
 import org.snomed.snowstorm.core.data.domain.ReferenceSetMemberView;
@@ -18,6 +19,7 @@ import org.snomed.snowstorm.core.data.services.identifier.IdentifierService;
 import org.snomed.snowstorm.core.data.services.pojo.MemberSearchRequest;
 import org.snomed.snowstorm.core.data.services.pojo.PageWithBucketAggregations;
 import org.snomed.snowstorm.core.data.services.pojo.RefSetMemberPageWithBucketAggregations;
+import org.snomed.snowstorm.core.pojo.LanguageDialect;
 import org.snomed.snowstorm.core.util.TimerUtil;
 import org.snomed.snowstorm.ecl.ECLQueryService;
 import org.snomed.snowstorm.rest.pojo.ItemsPage;
@@ -25,6 +27,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.http.HttpStatus;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
 
 import javax.validation.Valid;
@@ -48,9 +51,8 @@ public class ReferenceSetMemberController {
 	@Autowired
 	private VersionControlHelper versionControlHelper;
 
-	@ApiOperation("Search for reference set ids")
+	@ApiOperation("Search for reference set ids.")
 	@RequestMapping(value = "/browser/{branch}/members", method = RequestMethod.GET)
-	@ResponseBody
 	public RefSetMemberPageWithBucketAggregations<ReferenceSetMember> findBrowserReferenceSetMembersWithAggregations(
 			@PathVariable String branch,
 			@ApiParam("A reference set identifier or ECL expression can be used to limit the reference sets searched. Example: <723564002")
@@ -59,10 +61,10 @@ public class ReferenceSetMemberController {
 			@RequestParam(required = false) Boolean active,
 			@RequestParam(defaultValue = "0") int offset,
 			@RequestParam(defaultValue = "10") int limit,
-			@RequestHeader(value = "Accept-Language", defaultValue = ControllerHelper.DEFAULT_ACCEPT_LANG_HEADER) String acceptLanguageHeader) {
+			@RequestHeader(value = "Accept-Language", defaultValue = Config.DEFAULT_ACCEPT_LANG_HEADER) String acceptLanguageHeader) {
 
 		branch = BranchPathUriUtil.decodePath(branch);
-		List<String> languageCodes = ControllerHelper.getLanguageCodes(acceptLanguageHeader);
+		List<LanguageDialect> languageDialects = ControllerHelper.parseAcceptLanguageHeaderWithDefaultFallback(acceptLanguageHeader);
 		PageRequest pageRequest = ControllerHelper.getPageRequest(offset, limit);
 
 		TimerUtil timer = new TimerUtil("Member aggregation debug " + branch);
@@ -82,7 +84,7 @@ public class ReferenceSetMemberController {
 		timer.checkpoint("load types (" + referenceSetIds.size() + ")");
 
 		// Load concept minis
-		Map<String, ConceptMini> conceptMinis = conceptService.findConceptMinis(branch, Sets.union(referenceSetIds, new HashSet<>(refsetTypes.values())), languageCodes).getResultsMap();
+		Map<String, ConceptMini> conceptMinis = conceptService.findConceptMinis(branch, Sets.union(referenceSetIds, new HashSet<>(refsetTypes.values())), languageDialects).getResultsMap();
 		Map<String, ConceptMini> referenceSets = new HashMap<>();
 		for (String referenceSetId : referenceSetIds) {
 			ConceptMini refsetMini = conceptMinis.get(referenceSetId);
@@ -110,7 +112,6 @@ public class ReferenceSetMemberController {
 
 	@ApiOperation("Search for reference set members.")
 	@RequestMapping(value = "/{branch}/members", method = RequestMethod.GET)
-	@ResponseBody
 	@JsonView(value = View.Component.class)
 	public ItemsPage<ReferenceSetMember> findRefsetMembers(@PathVariable String branch,
 			@ApiParam("A reference set identifier or ECL expression can be used to limit the reference sets searched. Example: <723564002")
@@ -125,7 +126,7 @@ public class ReferenceSetMemberController {
 			@RequestParam(name = "owlExpression.gci", required = false) Boolean owlExpressionGCI,
 			@RequestParam(defaultValue = "0") int offset,
 			@RequestParam(defaultValue = "50") int limit,
-			@RequestHeader(value = "Accept-Language", defaultValue = ControllerHelper.DEFAULT_ACCEPT_LANG_HEADER) String acceptLanguageHeader) {
+			@RequestHeader(value = "Accept-Language", defaultValue = Config.DEFAULT_ACCEPT_LANG_HEADER) String acceptLanguageHeader) {
 
 		Page<ReferenceSetMember> members = memberService.findMembers(
 				BranchPathUriUtil.decodePath(branch),
@@ -140,13 +141,13 @@ public class ReferenceSetMemberController {
 				,
 				ControllerHelper.getPageRequest(offset, limit)
 		);
-		joinReferencedComponents(members.getContent(), ControllerHelper.getLanguageCodes(acceptLanguageHeader), branch);
+		joinReferencedComponents(members.getContent(), ControllerHelper.parseAcceptLanguageHeaderWithDefaultFallback(acceptLanguageHeader), branch);
 		return new ItemsPage<>(members);
 	}
 
-	private void joinReferencedComponents(List<ReferenceSetMember> members, List<String> languageCodes, String branch) {
+	private void joinReferencedComponents(List<ReferenceSetMember> members, List<LanguageDialect> languageDialects, String branch) {
 		Set<String> conceptIds = members.stream().map(ReferenceSetMember::getReferencedComponentId).filter(IdentifierService::isConceptId).collect(Collectors.toSet());
-		Map<String, ConceptMini> conceptMinis = conceptService.findConceptMinis(BranchPathUriUtil.decodePath(branch), conceptIds, languageCodes).getResultsMap();
+		Map<String, ConceptMini> conceptMinis = conceptService.findConceptMinis(BranchPathUriUtil.decodePath(branch), conceptIds, languageDialects).getResultsMap();
 		members.forEach(member -> {
 			ConceptMini conceptMini = conceptMinis.get(member.getReferencedComponentId());
 			if (conceptMini != null) {
@@ -157,20 +158,20 @@ public class ReferenceSetMemberController {
 
 
 	@RequestMapping(value = "/{branch}/members/{uuid}", method = RequestMethod.GET)
-	@ResponseBody
 	@JsonView(value = View.Component.class)
 	public ReferenceSetMember fetchMember(@PathVariable String branch,
 			@PathVariable String uuid,
-			@RequestHeader(value = "Accept-Language", defaultValue = ControllerHelper.DEFAULT_ACCEPT_LANG_HEADER) String acceptLanguageHeader) {
+			@RequestHeader(value = "Accept-Language", defaultValue = Config.DEFAULT_ACCEPT_LANG_HEADER) String acceptLanguageHeader) {
 
 		ReferenceSetMember member = memberService.findMember(BranchPathUriUtil.decodePath(branch), uuid);
 		ControllerHelper.throwIfNotFound("Member", member);
-		joinReferencedComponents(Collections.singletonList(member), ControllerHelper.getLanguageCodes(acceptLanguageHeader), branch);
+		joinReferencedComponents(Collections.singletonList(member), ControllerHelper.parseAcceptLanguageHeaderWithDefaultFallback(acceptLanguageHeader), branch);
 		return member;
 	}
 
+	@ApiOperation("Create a reference set member.")
 	@RequestMapping(value = "/{branch}/members", method = RequestMethod.POST)
-	@ResponseBody
+	@PreAuthorize("hasPermission('AUTHOR', #branch)")
 	@JsonView(value = View.Component.class)
 	public ReferenceSetMemberView createMember(@PathVariable String branch, @RequestBody @Valid ReferenceSetMemberView member) {
 		ControllerHelper.requiredParam(member.getReferencedComponentId(), "referencedComponentId");
@@ -178,9 +179,9 @@ public class ReferenceSetMemberController {
 		return memberService.createMember(BranchPathUriUtil.decodePath(branch), (ReferenceSetMember) member);
 	}
 
-	@ApiOperation("Update a reference set member")
+	@ApiOperation("Update a reference set member.")
 	@RequestMapping(value = "/{branch}/members/{uuid}", method = RequestMethod.PUT)
-	@ResponseBody
+	@PreAuthorize("hasPermission('AUTHOR', #branch)")
 	@JsonView(value = View.Component.class)
 	public ReferenceSetMemberView updateMember(@PathVariable String branch,
 												 @PathVariable String uuid,
@@ -193,13 +194,44 @@ public class ReferenceSetMemberController {
 		return memberService.updateMember(BranchPathUriUtil.decodePath(branch), toUpdate);
 	}
 
+	@ApiOperation("Delete a reference set member.")
 	@RequestMapping(value = "/{branch}/members/{uuid}", method = RequestMethod.DELETE)
+	@PreAuthorize("hasPermission('AUTHOR', #branch)")
 	@JsonView(value = View.Component.class)
 	@ResponseStatus(HttpStatus.NO_CONTENT)
-	public void deleteMember(@PathVariable String branch,
-							 @PathVariable String uuid,
-							 @RequestParam(defaultValue = "false") boolean force) {
+	public void deleteMember(
+			@PathVariable String branch,
+			@PathVariable String uuid,
+			@ApiParam("Force the deletion of a released member.")
+			@RequestParam(defaultValue = "false") boolean force) {
 
 		memberService.deleteMember(BranchPathUriUtil.decodePath(branch), uuid, force);
+	}
+
+	@ApiOperation("Batch delete reference set members.")
+	@RequestMapping(value = "/{branch}/members", method = RequestMethod.DELETE)
+	@PreAuthorize("hasPermission('AUTHOR', #branch)")
+	@JsonView(value = View.Component.class)
+	@ResponseStatus(HttpStatus.NO_CONTENT)
+	public void deleteMembers(
+			@PathVariable String branch,
+			@RequestBody MemberIdsPojo memberIdsPojo,
+			@ApiParam("Force the deletion of released members.")
+			@RequestParam(defaultValue = "false") boolean force) {
+
+		memberService.deleteMembers(BranchPathUriUtil.decodePath(branch), memberIdsPojo.getMemberIds(), force);
+	}
+
+	public static class MemberIdsPojo {
+
+		private Set<String> memberIds;
+
+		public Set<String> getMemberIds() {
+			return memberIds;
+		}
+
+		public void setMemberIds(Set<String> memberIds) {
+			this.memberIds = memberIds;
+		}
 	}
 }

@@ -4,15 +4,18 @@ import org.ihtsdo.otf.snomedboot.ReleaseImportException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.snomed.snowstorm.config.Config;
+import org.snomed.snowstorm.core.data.domain.QueryConcept;
 import org.snomed.snowstorm.core.data.services.CodeSystemService;
 import org.snomed.snowstorm.core.data.services.ReferenceSetMemberService;
+import org.snomed.snowstorm.core.data.services.StartupException;
 import org.snomed.snowstorm.core.rf2.RF2Type;
 import org.snomed.snowstorm.core.rf2.rf2import.ImportService;
-import org.snomed.snowstorm.mrcm.MRCMService;
+import org.springframework.beans.factory.BeanCreationException;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.ApplicationArguments;
 import org.springframework.boot.ApplicationRunner;
 import org.springframework.boot.SpringApplication;
+import org.springframework.cache.annotation.EnableCaching;
 import org.springframework.context.ApplicationContext;
 import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.jms.annotation.EnableJms;
@@ -27,6 +30,7 @@ import java.util.List;
 @EnableSwagger2
 @EnableJms
 @EnableScheduling
+@EnableCaching
 public class SnowstormApplication extends Config implements ApplicationRunner {
 
 	private static final String DELETE_INDICES_FLAG = "delete-indices";
@@ -38,9 +42,6 @@ public class SnowstormApplication extends Config implements ApplicationRunner {
 	private ImportService importService;
 	
 	@Autowired
-	private MRCMService mrcmService;
-
-	@Autowired
 	private ReferenceSetMemberService referenceSetMemberService;
 
 	@Autowired
@@ -49,26 +50,42 @@ public class SnowstormApplication extends Config implements ApplicationRunner {
 	@Autowired
 	private ApplicationContext applicationContext;
 
-	private final Logger logger = LoggerFactory.getLogger(getClass());
+	private static final Logger logger = LoggerFactory.getLogger(SnowstormApplication.class);
 
 	public static void main(String[] args) {
 		System.setProperty("org.apache.tomcat.util.buf.UDecoder.ALLOW_ENCODED_SLASH", "true"); // Swagger encodes the slash in branch paths
 		System.setProperty("tomcat.util.http.parser.HttpParser.requestTargetAllow", "{}|"); // Allow these unencoded characters in URL (used in ECL)
-		SpringApplication.run(SnowstormApplication.class, args);
+		try {
+			SpringApplication.run(SnowstormApplication.class, args);
+		} catch (BeanCreationException e) {
+			if (e.getCause() instanceof StartupException) {
+				StartupException startupException = (StartupException) e.getCause();
+				logger.error("Error creating Snowstorm Spring context:", e);
+				System.out.println();
+				System.out.println();
+				logger.error("Snowstorm failed to start. Cause: {}", startupException.getMessage());
+			}
+		}
 	}
 
 	@Override
-	public void run(ApplicationArguments applicationArguments) throws Exception {
+	public void run(ApplicationArguments applicationArguments) throws InterruptedException {
 		try {
 			boolean deleteIndices = applicationArguments.containsOption(DELETE_INDICES_FLAG);
 			if (deleteIndices) logger.warn("Deleting existing Elasticsearch Indices");
 			initialiseIndices(deleteIndices);
 
+			updateIndexMaxTermsSetting(QueryConcept.class);
+			updateIndexMaxTermsSettingForAllSnomedComponents();
+
 			codeSystemService.init();
-			mrcmService.loadFromFiles();
 			referenceSetMemberService.init();
 
 			logger.info("--- Snowstorm startup complete ---");
+
+			logger.info("Warming CodeSystem aggregation cache...");
+			codeSystemService.findAll();
+			logger.info("Caches are hot.");
 
 			if (applicationArguments.containsOption(IMPORT_ARG)) {
 				// Import a single release or 'Snapshot' from an Edition RF2 zip file from disk at startup
@@ -86,6 +103,8 @@ public class SnowstormApplication extends Config implements ApplicationRunner {
 			if (applicationArguments.containsOption(EXIT)) {
 				logger.info("Exiting application.");
 				((ConfigurableApplicationContext)applicationContext).close();
+				Thread.sleep(5_000);// Allow graceful shutdown
+				System.exit(0);
 			}
 		} catch (Exception e) {
 			// Logging and rethrowing because Spring does not seem to log this

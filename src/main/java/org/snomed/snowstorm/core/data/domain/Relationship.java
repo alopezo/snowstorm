@@ -5,6 +5,7 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.annotation.JsonView;
 import org.elasticsearch.common.Strings;
 import org.snomed.snowstorm.rest.View;
+import org.springframework.data.annotation.Transient;
 import org.springframework.data.elasticsearch.annotations.Document;
 import org.springframework.data.elasticsearch.annotations.Field;
 import org.springframework.data.elasticsearch.annotations.FieldType;
@@ -46,21 +47,21 @@ public class Relationship extends SnomedComponent<Relationship> {
 		String MODIFIER_ID = "modifierId";
 	}
 	@JsonView(value = View.Component.class)
-	@Field(type = FieldType.keyword)
+	@Field(type = FieldType.Keyword)
 	private String relationshipId;
 
 	@JsonView(value = View.Component.class)
-	@Field(type = FieldType.keyword)
+	@Field(type = FieldType.Keyword)
 	@NotNull
 	@Size(min = 5, max = 18)
 	private String moduleId;
 
 	@JsonView(value = View.Component.class)
-	@Field(type = FieldType.keyword, store = true)
+	@Field(type = FieldType.Keyword, store = true)
 	private String sourceId;
 
 	@JsonView(value = View.Component.class)
-	@Field(type = FieldType.keyword)
+	@Field(type = FieldType.Keyword)
 	@NotNull
 	@Size(min = 5, max = 18)
 	private String destinationId;
@@ -69,29 +70,37 @@ public class Relationship extends SnomedComponent<Relationship> {
 	private int relationshipGroup;
 
 	@JsonView(value = View.Component.class)
-	@Field(type = FieldType.keyword)
+	@Field(type = FieldType.Keyword)
 	@NotNull
 	@Size(min = 5, max = 18)
 	private String typeId;
 
-	@Field(type = FieldType.keyword)
+	@Field(type = FieldType.Keyword)
 	@NotNull
 	@Size(min = 5, max = 18)
 	private String characteristicTypeId;
 
-	@Field(type = FieldType.keyword)
+	@Field(type = FieldType.Keyword)
 	@NotNull
 	@Size(min = 5, max = 18)
 	private String modifierId;
 
+	@Transient
 	private ConceptMini source;
 
+	@Transient
 	private ConceptMini type;
 
+	@Transient
 	private ConceptMini target;
 
 	@JsonIgnore
+	@Transient
 	private Short attributeOrder;
+
+	@JsonIgnore
+	@Transient
+	private Integer groupOrder;
 
 	public Relationship() {
 		active = true;
@@ -321,6 +330,15 @@ public class Relationship extends SnomedComponent<Relationship> {
 
 	public void setAttributeOrder(Short attributeOrder) {
 		this.attributeOrder = attributeOrder;
+	}
+
+	@JsonIgnore
+	public int getGroupOrder() {
+		return groupOrder != null ? groupOrder : relationshipGroup;
+	}
+
+	public void setGroupOrder(int groupOrder) {
+		this.groupOrder = groupOrder;
 	}
 
 	@JsonIgnore

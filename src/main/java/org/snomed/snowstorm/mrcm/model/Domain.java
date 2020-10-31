@@ -1,40 +1,86 @@
 package org.snomed.snowstorm.mrcm.model;
 
-import java.util.HashSet;
-import java.util.Set;
-
 public class Domain {
-	private Long conceptId;
-	private InclusionType inclusionType;
-	private Set<Attribute> attributes;
 
-	public Domain(Long conceptId, InclusionType inclusionType) {
-		this.conceptId = conceptId;
-		this.inclusionType = inclusionType;
-		attributes = new HashSet<>();
+	private String id;
+	private String effectiveTime;
+	private boolean active;
+	private String referencedComponentId;
+	private Constraint domainConstraint;
+	private String parentDomain;
+	private Constraint proximalPrimitiveConstraint;
+	private String proximalPrimitiveRefinement;
+	private String domainTemplateForPrecoordination;
+	private String domainTemplateForPostcoordination;
+
+	public Domain(String id, String effectiveTime, boolean active, String referencedComponentId, Constraint domainConstraint, String parentDomain,
+			Constraint proximalPrimitiveConstraint, String proximalPrimitiveRefinement,
+				  String domainTemplateForPrecoordination, String domainTemplateForPostcoordination) {
+
+		this.id = id;
+		this.effectiveTime = effectiveTime;
+		this.active = active;
+		this.referencedComponentId = referencedComponentId;
+		this.domainConstraint = domainConstraint;
+		this.parentDomain = parentDomain;
+		this.proximalPrimitiveConstraint = proximalPrimitiveConstraint;
+		this.proximalPrimitiveRefinement = proximalPrimitiveRefinement;
+		this.domainTemplateForPrecoordination = domainTemplateForPrecoordination;
+		this.domainTemplateForPostcoordination = domainTemplateForPostcoordination;
 	}
 
-	public Long getConceptId() {
-		return conceptId;
+	public Domain (Domain domain) {
+		this.id = domain.getId();
+		this.effectiveTime = domain.getEffectiveTime();
+		this.active = domain.isActive();
+		this.referencedComponentId = domain.getReferencedComponentId();
+		this.domainConstraint = domain.getDomainConstraint();
+		this.parentDomain = domain.getParentDomain();
+		this.proximalPrimitiveConstraint = domain.getProximalPrimitiveConstraint();
+		this.proximalPrimitiveRefinement = domain.getProximalPrimitiveRefinement();
+		this.domainTemplateForPrecoordination = domain.getDomainTemplateForPrecoordination();
+		this.domainTemplateForPostcoordination = domain.getDomainTemplateForPostcoordination();
 	}
 
-	public void setConceptId(Long conceptId) {
-		this.conceptId = conceptId;
+	public String getId() {
+		return id;
 	}
 
-	public InclusionType getInclusionType() {
-		return inclusionType;
+	public String getEffectiveTime() {
+		return effectiveTime;
 	}
 
-	public void setInclusionType(InclusionType inclusionType) {
-		this.inclusionType = inclusionType;
+	public boolean isActive() {
+		return active;
 	}
 
-	public Set<Attribute> getAttributes() {
-		return attributes;
+	public String getReferencedComponentId() {
+		return referencedComponentId;
 	}
 
-	public void setAttributes(Set<Attribute> attributes) {
-		this.attributes = attributes;
+	public Constraint getDomainConstraint() {
+		return domainConstraint;
+	}
+
+	public String getParentDomain() { return parentDomain; }
+
+	public Constraint getProximalPrimitiveConstraint() {
+		return proximalPrimitiveConstraint;
+	}
+
+	public String getProximalPrimitiveRefinement() {
+		return proximalPrimitiveRefinement;
+	}
+
+	public String getDomainTemplateForPostcoordination() { return domainTemplateForPostcoordination; }
+
+	public String getDomainTemplateForPrecoordination() { return domainTemplateForPrecoordination; }
+
+	public void setDomainTemplateForPrecoordination(String domainTemplateForPrecoordination) {
+		this.domainTemplateForPrecoordination = domainTemplateForPrecoordination;
+	}
+
+	public void setDomainTemplateForPostcoordination(String domainTemplateForPostcoordination) {
+		this.domainTemplateForPostcoordination = domainTemplateForPostcoordination;
 	}
 }

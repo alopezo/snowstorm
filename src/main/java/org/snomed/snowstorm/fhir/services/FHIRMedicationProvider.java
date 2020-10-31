@@ -1,33 +1,22 @@
 package org.snomed.snowstorm.fhir.services;
 
-import ca.uhn.fhir.context.FhirContext;
-import ca.uhn.fhir.narrative.DefaultThymeleafNarrativeGenerator;
 import ca.uhn.fhir.rest.annotation.IdParam;
-import ca.uhn.fhir.rest.annotation.Operation;
-import ca.uhn.fhir.rest.annotation.OperationParam;
 import ca.uhn.fhir.rest.annotation.Read;
 import ca.uhn.fhir.rest.server.IResourceProvider;
 import org.hl7.fhir.instance.model.api.IBaseResource;
 import org.hl7.fhir.r4.model.*;
 import org.hl7.fhir.r4.model.OperationOutcome.IssueType;
-import org.snomed.snowstorm.core.data.domain.Concept;
-import org.snomed.snowstorm.core.data.domain.Concepts;
-import org.snomed.snowstorm.core.data.domain.Description;
-import org.snomed.snowstorm.core.data.domain.Relationship;
+import org.snomed.snowstorm.core.data.domain.*;
 import org.snomed.snowstorm.core.data.services.ConceptService;
-import org.snomed.snowstorm.core.data.services.QueryService;
+import org.snomed.snowstorm.core.pojo.*;
 import org.snomed.snowstorm.fhir.config.FHIRConstants;
-import org.snomed.snowstorm.fhir.domain.ValueSetWrapper;
 import org.snomed.snowstorm.rest.ControllerHelper;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.data.domain.Page;
 import org.springframework.stereotype.Component;
 
-import javax.servlet.http.HttpServletRequest;
-import javax.servlet.http.HttpServletResponse;
 import java.util.*;
 
-import static io.kaicode.elasticvc.api.ComponentService.LARGE_PAGE;
+import javax.servlet.http.HttpServletRequest;
 
 @Component
 public class FHIRMedicationProvider implements IResourceProvider, FHIRConstants {
@@ -36,28 +25,25 @@ public class FHIRMedicationProvider implements IResourceProvider, FHIRConstants 
 	private ConceptService conceptService;
 
 	@Autowired
-	private QueryService queryService;
-
-	@Autowired
-	private HapiParametersMapper mapper;
-	
-	@Autowired
 	private FHIRHelper fhirHelper;
-
+	
+	//TOODO Implement Find Resource taking filters for strength, ingredient and dose form
+	
 	@Read()
-	public Medication getMedication(@IdParam IdType id) throws FHIROperationException {
+	public Medication getMedication(HttpServletRequest request,
+									@IdParam IdType id) throws FHIROperationException {
 		Medication medication = new Medication();
-		List<String> languageCodes = new ArrayList<>();
-		languageCodes.add("es");
-		Concept concept = ControllerHelper.throwIfNotFound("Concept", conceptService.find(id.getIdPart(), languageCodes, "MAIN"));
+		List<LanguageDialect> languageDialects = fhirHelper.getLanguageDialects(null, request);
+		Concept concept = ControllerHelper.throwIfNotFound("Concept", conceptService.find(id.getIdPart(), languageDialects, "MAIN"));
 		medication.setId(id);
-		String fsn = getFSN(concept, "es");
-		CodeableConcept code = new CodeableConcept(new Coding(FHIRConstants.SNOMED_URI, concept.getId(), fsn));
+		TermLangPojo fsn = concept.getFsn(languageDialects);
+		CodeableConcept code = new CodeableConcept(new Coding(FHIRConstants.SNOMED_URI, concept.getId(), fsn.getTerm()));
 		medication.setCode(code);
 		Set<Integer> groups = new HashSet<>();
 		List<Relationship> rels = concept.getRelationships(true, null, null, Concepts.INFERRED_RELATIONSHIP);
 		for (Relationship r : rels) {
-			if (r.getTypeId().equals("762949000")) {
+			//Pull out active ingredient / precise active ingredient
+			if (r.getTypeId().equals("127489000") || r.getTypeId().equals("762949000")) {
 				groups.add(r.getGroupId());
 				Substance substance = new Substance();
 				substance.setId("#" + r.getDestinationId());
@@ -67,6 +53,8 @@ public class FHIRMedicationProvider implements IResourceProvider, FHIRConstants 
 				substance.setCode(substanceCode);
 				medication.addContained(substance);
 			}
+			
+			//Pull out Dose Form
 			if (r.getTypeId().equals("411116001")) {
 				CodeableConcept formCode = new CodeableConcept();
 				Coding coding = new Coding(FHIRConstants.SNOMED_URI, r.getDestinationId(), r.getTargetFsn());
@@ -110,24 +98,14 @@ public class FHIRMedicationProvider implements IResourceProvider, FHIRConstants 
 			// Generate Narrative TODO: implement automatic generation with context
 			Narrative narrative = new Narrative();
 			narrative.setStatus(Narrative.NarrativeStatus.GENERATED);
-			String div = "<div xmlns=\\\"http://www.w3.org/1999/xhtml\\\"><p><b>Generated Narrative with Details</b></p>";
+			String div = "<div xmlns=\"http://www.w3.org/1999/xhtml\"><p><b>Generated Narrative with Details</b></p>";
 			div += "<p>id:" + concept.getId() + "</p>";
-			div += "<p>code:" + fsn + "</p>";
+			div += "<p>code:" + fsn.getTerm() + "</p>";
 			div += "</div>";
 			narrative.setDivAsString(div);
 			medication.setText(narrative);
 			return medication;
 		}
-	}
-
-	private String getFSN(Concept c, String languageCode) {
-		String term = "";
-		for (Description d : c.getDescriptions(true, null, null, null)) {
-			if (d.getTypeId().equals(Concepts.FSN) && d.getLanguageCode().equals(languageCode)) {
-				term = d.getTerm();
-			}
-		}
-		return term;
 	}
 
 	@Override

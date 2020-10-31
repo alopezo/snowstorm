@@ -5,6 +5,8 @@ import org.snomed.snowstorm.ecl.domain.RefinementBuilder;
 import org.snomed.snowstorm.ecl.domain.SRefinement;
 import org.snomed.snowstorm.ecl.domain.expressionconstraint.MatchContext;
 
+import java.util.Set;
+
 public class SSubAttributeSet extends SubAttributeSet implements SRefinement {
 
 	@Override
@@ -14,6 +16,14 @@ public class SSubAttributeSet extends SubAttributeSet implements SRefinement {
 		} else {
 			((SEclAttributeSet)attributeSet).addCriteria(refinementBuilder);
 		}
+	}
+
+	@Override
+	public Set<String> getConceptIds() {
+		if (attribute != null) {
+			return ((SEclAttribute) attribute).getConceptIds();
+		}
+		return ((SEclAttributeSet) attributeSet).getConceptIds();
 	}
 
 	public void checkConceptConstraints(MatchContext matchContext) {

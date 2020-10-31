@@ -8,17 +8,25 @@ public class FHIROperationException extends Exception {
 	
 	IssueType issueType;
 	
-	FHIROperationException (IssueType issueType, String message) {
+	public FHIROperationException (IssueType issueType, String message) {
 		super(message);
 		this.issueType = issueType;
 	}
 	
-	FHIROperationException (IssueType issueType, String message, Exception e) {
+	public FHIROperationException (IssueType issueType, String message, Exception e) {
 		super(message, e);
 		this.issueType = issueType;
 	}
 	
 	public IssueType getIssueType() {
 		return issueType;
+	}
+	
+	public String getMessage() {
+		String msg = super.getMessage();
+		if (getCause() != null) {
+			msg += " due to: " + getCause().getMessage();
+		}
+		return msg;
 	}
 }
